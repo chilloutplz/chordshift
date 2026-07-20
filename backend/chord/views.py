@@ -1,6 +1,16 @@
+import os
+import tempfile
+
+from PIL import Image
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+
+from .services.ocr_service import OCRService
+
+
+service = OCRService()
 
 
 class UploadChordImageView(APIView):
@@ -10,6 +20,7 @@ class UploadChordImageView(APIView):
         image = request.FILES.get("image")
 
         if image is None:
+
             return Response(
                 {
                     "success": False,
@@ -18,12 +29,34 @@ class UploadChordImageView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        return Response(
-            {
-                "success": True,
-                "message": "업로드 성공",
-                "filename": image.name,
-                "codes": []
-            },
-            status=status.HTTP_200_OK
-        )
+        # 항상 PNG로 저장
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp:
+
+            img = Image.open(image)
+
+            # 투명 GIF 대응
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            img.save(temp.name, "PNG")
+
+            temp_path = temp.name
+
+        try:
+
+            texts = service.detect(temp_path)
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "OCR 완료",
+                    "data": {
+                        "texts": texts
+                    }
+                }
+            )
+
+        finally:
+
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
