@@ -1,0 +1,24 @@
+# Python
+.venv/
+**/__pycache__/
+*.pyc
+*.bat
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+
+# Media / temp
+backend/media/
+**/tmp/
+
+# IDE / OS
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
+
+# Paddle / local models (있으면)
+.paddlex/
