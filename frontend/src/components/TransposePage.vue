@@ -8,6 +8,12 @@ const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 const NOTE_IDX = Object.fromEntries(NOTES.map((n, i) => [n, i]))
 NOTE_IDX['Db']=1; NOTE_IDX['Eb']=3; NOTE_IDX['Gb']=6; NOTE_IDX['Ab']=8; NOTE_IDX['Bb']=10
 
+function normalizeSemitones(n) {
+  n = ((Number(n) || 0) % 12 + 12) % 12
+  if (n > 6) n -= 12
+  return n
+}
+
 function transposeChordName(name, semitones) {
   if (!name || !semitones) return name
   const s = String(name).trim()
@@ -51,6 +57,7 @@ function withCache(url) {
 
 const semitones = ref(0)
 const rendering = ref(false)
+const imageLoading = ref(false)
 const message = ref('')
 const lastVariantUrl = ref('')
 const localVariants = ref([])
@@ -77,6 +84,18 @@ watch(
 
 const resultUrl = computed(() => withCache(lastVariantUrl.value || props.sheet.result_image || ''))
 
+watch(resultUrl, (url) => {
+  imageLoading.value = !!url
+}, { immediate: true })
+
+function onImageLoad() {
+  imageLoading.value = false
+}
+function onImageError() {
+  imageLoading.value = false
+  message.value = '이미지를 불러오지 못했습니다'
+}
+
 const previewChords = computed(() => {
   const delta = semitones.value || 0
   const lines = Array.isArray(props.sheet.chords) ? props.sheet.chords : []
@@ -90,7 +109,7 @@ const previewChords = computed(() => {
 })
 
 function doTranspose(delta) {
-  semitones.value = semitones.value + delta
+  semitones.value = normalizeSemitones(semitones.value + delta)
   message.value = `조옮김 ${semitones.value > 0 ? '+' : ''}${semitones.value} (미리보기) · 아래 버튼으로 결과 생성`
 }
 
@@ -110,26 +129,6 @@ async function renderAndSave() {
         label: keyLabel(props.sheet.chords || [], semitones.value),
       }),
     })
-
-    // 구 API 폴백
-    if (res.status === 404) {
-      res = await fetch(`/api/scores/${id}/confirm/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chords: props.sheet.chords || [] }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || '저장 실패')
-      }
-      const data = await res.json()
-      if (data.result_image || data.optimized_image) {
-        lastVariantUrl.value = data.result_image || data.optimized_image
-      }
-      emit('updated', data)
-      message.value = '결과 악보 저장됨'
-      return
-    }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
@@ -202,8 +201,9 @@ async function downloadResult() {
 
 function showVariant(v) {
   if (v?.image) {
+    imageLoading.value = true
     lastVariantUrl.value = v.image
-    semitones.value = v.transpose_semitones || 0
+    semitones.value = normalizeSemitones(v.transpose_semitones || 0)
   }
 }
 </script>
@@ -253,10 +253,25 @@ function showVariant(v) {
       </div>
     </section>
 
-    <section v-if="resultUrl" class="result">
+    <section v-if="resultUrl || rendering" class="result">
       <h3>결과 악보</h3>
-      <img :src="resultUrl" alt="결과 악보" />
-      <button type="button" class="dl" @click="downloadResult">다운로드</button>
+      <div class="img-wrap">
+        <div v-if="rendering || imageLoading" class="img-loading">
+          <div class="spinner"></div>
+          <p>{{ rendering ? '결과 악보를 생성·저장하는 중…' : '이미지를 불러오는 중…' }}</p>
+        </div>
+        <img
+          v-if="resultUrl"
+          :src="resultUrl"
+          alt="결과 악보"
+          :class="{ dim: imageLoading || rendering }"
+          @load="onImageLoad"
+          @error="onImageError"
+        />
+      </div>
+      <button type="button" class="dl" :disabled="!resultUrl || rendering || imageLoading" @click="downloadResult">
+        다운로드
+      </button>
     </section>
     <p v-else class="muted">아직 결과 이미지가 없습니다. 「결과 악보 생성 · 저장」을 눌러주세요.</p>
   </div>
@@ -277,6 +292,21 @@ function showVariant(v) {
 .save:disabled { opacity: 0.5; }
 .result { padding: 1rem; border: 2px solid #0a7a3e; border-radius: 10px; background: #f6fbf8; }
 .result img { width: 100%; border-radius: 6px; border: 1px solid #ddd; display: block; }
+.result img.dim { opacity: 0.35; }
+.img-wrap { position: relative; min-height: 120px; }
+.img-loading {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.6rem; background: rgba(246, 251, 248, 0.85);
+  border-radius: 6px; color: #0a7a3e; font-weight: 600; font-size: 0.95rem;
+}
+.spinner {
+  width: 32px; height: 32px;
+  border: 3px solid #cce8d8; border-top-color: #0a7a3e;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.dl:disabled { opacity: 0.5; cursor: not-allowed; }
 .dl {
   display: inline-block;
   margin-top: 0.5rem;

@@ -5,16 +5,17 @@ Django settings for config project.
 from pathlib import Path
 import os
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
-SECRET_KEY = 'django-insecure-chordshift-dev-key-change-in-production'
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-chordshift-dev-key-change-in-production')
 
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'true').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '*').split(',') if h.strip()]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -23,10 +24,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    # Third-party
     'rest_framework',
     'corsheaders',
-    # Local
     'scores',
 ]
 
@@ -60,10 +59,29 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
+# --- Database (PostgreSQL only) ---
+# .env: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+_db_host = os.getenv('DB_HOST', '').strip()
+_db_user = os.getenv('DB_USER', '').strip()
+_db_password = os.getenv('DB_PASSWORD', '')
+_db_name = os.getenv('DB_NAME', '').strip() or 'chordshift'
+_db_port = os.getenv('DB_PORT', '').strip() or '5432'
+
+if not _db_host or not _db_user:
+    raise ImproperlyConfigured(
+        'PostgreSQL 설정이 필요합니다. .env 에 DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT 를 넣으세요.'
+    )
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': _db_name,
+        'USER': _db_user,
+        'PASSWORD': _db_password,
+        'HOST': _db_host,
+        'PORT': _db_port,
+        'CONN_MAX_AGE': 600,
+        'OPTIONS': {},
     }
 }
 
@@ -87,8 +105,6 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # --- Cloudflare R2 (정식 저장) / 로컬 (tmp) ---
-# .env 에 R2_* 가 있으면 ImageField 기본 저장소를 R2 로 사용
-# media/tmp 는 계속 로컬 MEDIA_ROOT 사용 (temp_store.py)
 R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID')
 R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
 R2_BUCKET_NAME = os.getenv('R2_BUCKET_NAME') or os.getenv('AWS_STORAGE_BUCKET_NAME') or 'chordshift'
@@ -108,9 +124,9 @@ if USE_R2:
                 'bucket_name': R2_BUCKET_NAME,
                 'endpoint_url': R2_ENDPOINT_URL,
                 'region_name': R2_REGION,
-                'default_acl': None,  # R2 ACL 미사용
-                'querystring_auth': True,  # 비공개 버킷이면 서명 URL
-                'file_overwrite': False,
+                'default_acl': None,
+                'querystring_auth': True,
+                'file_overwrite': True,
                 'object_parameters': {
                     'CacheControl': 'max-age=86400',
                 },
@@ -120,7 +136,6 @@ if USE_R2:
             'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
         },
     }
-    # 브라우저에서 바로 열 공개 URL이 있으면 사용
     if R2_CUSTOM_DOMAIN:
         STORAGES['default']['OPTIONS']['custom_domain'] = R2_CUSTOM_DOMAIN.replace('https://', '').replace('http://', '')
         STORAGES['default']['OPTIONS']['querystring_auth'] = False
@@ -136,10 +151,8 @@ else:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS (Vue frontend)
-CORS_ALLOW_ALL_ORIGINS = True  # 개발용. 운영시 제한 필요
+CORS_ALLOW_ALL_ORIGINS = True
 
-# REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
@@ -148,7 +161,6 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Image processing settings
 MOBILE_IMAGE_MAX_WIDTH = 1080
 MOBILE_IMAGE_MAX_HEIGHT = 1920
 MOBILE_IMAGE_QUALITY = 85

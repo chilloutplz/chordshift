@@ -33,6 +33,21 @@ def _parse_chord(chord_str: str):
     return root, quality
 
 
+def normalize_semitones(n: int) -> int:
+    """
+    12음 동등 기질로 반음 수를 정규화.
+    +2 와 +14 → 2, -1 과 +11 → -1 (범위 -5 ~ +6)
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 0
+    n = n % 12
+    if n > 6:
+        n -= 12
+    return n
+
+
 def transpose_note(root: str, semitones: int, prefer_flat: bool = False) -> str:
     """단일 루트 노트를 반음 이동"""
     idx = NOTE_TO_IDX.get(root)

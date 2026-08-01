@@ -399,22 +399,9 @@ async function saveLines() {
 }
 
 async function doTranspose(delta) {
-  // 원본 lines(보정본)는 유지, semitones만 변경
-  const target = semitones.value + delta
-  saving.value = true
-  try {
-    const res = await fetch(`/api/scores/${props.sheet.id}/transpose/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ semitones: target }),
-    })
-    if (!res.ok) throw new Error('조옮김 실패')
-    const data = await res.json()
-    semitones.value = data.transpose_semitones ?? target
-    emit('updated', data)
-    message.value = `조옮김 ${target > 0 ? '+' : ''}${target} (원본 보정본 유지)`
-  } catch (e) { message.value = e.message }
-  finally { saving.value = false }
+  // 보정 화면 미리보기용 (원본 lines 유지)
+  semitones.value = (semitones.value || 0) + delta
+  message.value = `조옮김 미리보기 ${semitones.value > 0 ? '+' : ''}${semitones.value}`
 }
 
 async function saveBase(mergeSongId = null, forceNew = false) {
@@ -512,24 +499,6 @@ async function confirmSheet() {
         label: keyLabelFromLines(lines.value, 0),
       }),
     })
-
-    // 구 ScoreSheet API 폴백
-    if (res.status === 404) {
-      res = await fetch(`/api/scores/${songId}/confirm/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chords: lines.value }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || '확정 실패')
-      }
-      const data = await res.json()
-      emit('updated', data)
-      message.value = '확정됨 · 조옮김 단계로 이동'
-      emit('next', data)
-      return
-    }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))

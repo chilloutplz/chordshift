@@ -63,7 +63,7 @@ async function loadAll() {
   try {
     let res = await fetch('/api/songs/')
     if (!res.ok) {
-      res = await fetch('/api/scores/')
+      res = await fetch('/api/songs/')
       if (!res.ok) throw new Error('목록을 불러오지 못했습니다')
     }
     const data = await res.json()
@@ -88,7 +88,7 @@ async function search() {
     }
     let res = await fetch(`/api/songs/search/?q=${encodeURIComponent(q)}`)
     if (!res.ok) {
-      res = await fetch(`/api/scores/search/?q=${encodeURIComponent(q)}`)
+      res = await fetch(`/api/songs/search/?q=${encodeURIComponent(q)}`)
     }
     if (!res.ok) throw new Error('검색 실패')
     const data = await res.json()

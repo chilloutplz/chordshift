@@ -179,9 +179,12 @@ class SongViewSet(viewsets.ModelViewSet):
         song = self.get_object()
         if not song.original_image:
             return Response({'error': '원본 이미지 없음'}, status=400)
-        semitones = int(request.data.get('semitones', 0))
+        from .utils.chord_transpose import transpose_chord_str, normalize_semitones
+        try:
+            semitones = normalize_semitones(request.data.get('semitones', 0))
+        except Exception:
+            semitones = 0
         chords = request.data.get('chords') or song.chords or []
-        from .utils.chord_transpose import transpose_chord_str
         from .utils.render_sheet import render_transposed_sheet
 
         render_chords = chords
@@ -233,14 +236,21 @@ class SongViewSet(viewsets.ModelViewSet):
             root = (m.group(1)[0].upper() + m.group(1)[1:]) if m else 'C'
             label = f'{root}코드'
 
-        # 같은 semitones variant 있으면 이미지 교체
+        # 같은 song + semitones 는 한 레코드, 이미지는 고정 키로 덮어쓰기
         variant, _ = ScoreVariant.objects.get_or_create(
             song=song, transpose_semitones=semitones,
             defaults={'kind': kind, 'label': label},
         )
         variant.kind = kind
         variant.label = label
-        variant.image.save(content.name, content, save=True)
+        # 예: songs/variants/<song_id>_t0.jpg  (보정본), _t2.jpg (조옮김)
+        filename = f'{song.id}_t{semitones}.jpg'
+        if variant.image and variant.image.name:
+            try:
+                variant.image.delete(save=False)
+            except Exception:
+                pass
+        variant.image.save(filename, content, save=True)
         song.save(update_fields=['updated_at'])
         # relation cache 갱신 후 직렬화
         song = Song.objects.prefetch_related('variants').get(pk=song.pk)
