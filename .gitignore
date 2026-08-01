@@ -4,6 +4,7 @@
 *.pyc
 *.bat
 *.sqlite3
+.env
 
 # Node
 node_modules/

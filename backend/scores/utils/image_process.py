@@ -1,37 +1,30 @@
 """
-업로드 이미지를 모바일 최적화 사이즈로 변환하고 원본을 삭제한다.
+업로드 이미지를 일정 규격으로 맞춘 뒤 JPEG로 저장.
+- 최대 1080×1600 안에 비율 유지 리사이즈
+- 가로가 짧은 이미지도 최소 너비 720까지는 맞춤(너무 작은 원본 대비)
+- EXIF 회전 보정, RGB JPEG
 """
 from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
 from django.core.files.base import ContentFile
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def optimize_for_mobile(uploaded_file) -> ContentFile:
-    """
-    업로드된 이미지를 모바일 최적화 크기로 리사이즈/압축한다.
-    - 최대 너비: MOBILE_IMAGE_MAX_WIDTH (기본 1080)
-    - 최대 높이: MOBILE_IMAGE_MAX_HEIGHT (기본 1920)
-    - JPEG quality: MOBILE_IMAGE_QUALITY (기본 85)
-    - EXIF 회전 보정 적용
-    - 원본 파일은 호출측에서 삭제해야 함 (이 함수는 새 ContentFile만 반환)
-    """
     max_w = getattr(settings, 'MOBILE_IMAGE_MAX_WIDTH', 1080)
-    max_h = getattr(settings, 'MOBILE_IMAGE_MAX_HEIGHT', 1920)
+    max_h = getattr(settings, 'MOBILE_IMAGE_MAX_HEIGHT', 1600)
+    min_w = getattr(settings, 'MOBILE_IMAGE_MIN_WIDTH', 720)
     quality = getattr(settings, 'MOBILE_IMAGE_QUALITY', 85)
 
     img = Image.open(uploaded_file)
 
-    # EXIF orientation 보정
     try:
-        from PIL import ImageOps
         img = ImageOps.exif_transpose(img)
     except Exception:
         pass
 
-    # RGBA → RGB (JPEG 저장용)
     if img.mode in ('RGBA', 'P'):
         background = Image.new('RGB', img.size, (255, 255, 255))
         if img.mode == 'P':
@@ -41,15 +34,22 @@ def optimize_for_mobile(uploaded_file) -> ContentFile:
     elif img.mode != 'RGB':
         img = img.convert('RGB')
 
-    # 비율 유지 리사이즈
-    img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+    w, h = img.size
+
+    # 1) 너무 작으면 최소 너비까지 확대 (비율 유지)
+    if w < min_w:
+        scale = min_w / w
+        img = img.resize((min_w, max(1, int(h * scale))), Image.Resampling.LANCZOS)
+        w, h = img.size
+
+    # 2) 최대 박스 안으로 축소
+    if w > max_w or h > max_h:
+        img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
 
     buffer = BytesIO()
     img.save(buffer, format='JPEG', quality=quality, optimize=True)
     buffer.seek(0)
 
-    # 파일명: 원본 stem + .jpg
     original_name = Path(getattr(uploaded_file, 'name', 'score.jpg')).stem
     new_name = f"{original_name}_opt.jpg"
-
     return ContentFile(buffer.read(), name=new_name)

@@ -1,7 +1,17 @@
-Django>=5.0
-djangorestframework
-django-cors-headers
-Pillow
-# Python 3.10 ~ 3.12 권장
+# ChordShift backend
+# Python 3.10 ~ 3.12 권장 (PaddleOCR 공식: 3.8–3.12)
+
+Django>=5.0,<7
+djangorestframework>=3.14
+django-cors-headers>=4.0
+Pillow>=10.0
+
+# OCR — 버전 고정 (Python 3.12 호환 검증됨)
+# PaddleOCR 3.x 는 PaddlePaddle >= 3.0 필요
 paddlepaddle==3.3.1
 paddleocr==3.7.0
+
+# Cloudflare R2 (S3-compatible)
+django-storages[s3]>=1.14
+boto3>=1.34
+python-dotenv>=1.0

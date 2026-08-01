@@ -1,108 +1,234 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import UploadScore from './UploadScore.vue'
+import { ref, computed, onMounted } from 'vue'
 
-const emit = defineEmits(['open', 'uploaded'])
+const emit = defineEmits(['open', 'go-upload'])
+
+const CHO = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ']
+
 const query = ref('')
-const results = ref([])
+const allSongs = ref([])
 const loading = ref(false)
-const showUpload = ref(false)
 const error = ref('')
+const searched = ref(false) // 검색을 한 번이라도 실행했는지
+const openFolder = ref(null)
 
-async function search(q = query.value) {
+function getCho(title) {
+  const c = (title || '').trim().charAt(0)
+  if (!c) return '기타'
+  const code = c.charCodeAt(0)
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    return CHO[Math.floor((code - 0xac00) / (21 * 28))] || '기타'
+  }
+  const choIdx = CHO.indexOf(c)
+  if (choIdx >= 0) return CHO[choIdx]
+  if (/[A-Za-z]/.test(c)) return c.toUpperCase()
+  if (/[0-9]/.test(c)) return '0-9'
+  return '기타'
+}
+
+const folders = computed(() => {
+  const map = new Map()
+  for (const s of allSongs.value) {
+    const key = getCho(s.title)
+    if (!map.has(key)) map.set(key, [])
+    map.get(key).push(s)
+  }
+  const keys = [...map.keys()].sort((a, b) => {
+    const order = (k) => {
+      const i = CHO.indexOf(k)
+      if (i >= 0) return i
+      if (/^[A-Z]$/.test(k)) return 100 + k.charCodeAt(0)
+      if (k === '0-9') return 200
+      return 300
+    }
+    return order(a) - order(b)
+  })
+  return keys.map((key) => ({
+    key,
+    count: map.get(key).length,
+    songs: map.get(key).sort((a, b) =>
+      (a.title || '').localeCompare(b.title || '', 'ko')
+    ),
+  }))
+})
+
+function variantCount(s) {
+  if (Array.isArray(s.variants)) return s.variants.length
+  return 0
+}
+
+async function loadAll() {
   loading.value = true
   error.value = ''
   try {
-    const url = q.trim()
-      ? `/api/scores/search/?q=${encodeURIComponent(q.trim())}`
-      : '/api/scores/'
-    const res = await fetch(url)
-    if (!res.ok) throw new Error('검색 실패')
+    let res = await fetch('/api/songs/')
+    if (!res.ok) {
+      res = await fetch('/api/scores/')
+      if (!res.ok) throw new Error('목록을 불러오지 못했습니다')
+    }
     const data = await res.json()
-    const list = Array.isArray(data) ? data : (data.results || [])
-    // 최근 5개
-    results.value = list.slice(0, 5)
+    allSongs.value = Array.isArray(data) ? data : (data.results || [])
   } catch (e) {
     error.value = e.message
-    results.value = []
+    allSongs.value = []
   } finally {
     loading.value = false
   }
 }
 
-async function deleteSheet(sheet, e) {
-  e?.stopPropagation?.()
-  const name = sheet.title || sheet.share_token || '이 악보'
-  if (!confirm(`"${name}" 을(를) 삭제할까요?\n이미지 파일과 데이터가 모두 삭제됩니다.`)) return
+async function search() {
+  const q = query.value.trim()
+  searched.value = true
+  loading.value = true
+  error.value = ''
   try {
-    const res = await fetch(`/api/scores/${sheet.id}/`, { method: 'DELETE' })
-    if (!res.ok && res.status !== 204) throw new Error('삭제 실패')
-    results.value = results.value.filter((s) => s.id !== sheet.id)
-  } catch (err) {
-    alert(err.message || '삭제 중 오류')
+    if (!q) {
+      await loadAll()
+      return
+    }
+    let res = await fetch(`/api/songs/search/?q=${encodeURIComponent(q)}`)
+    if (!res.ok) {
+      res = await fetch(`/api/scores/search/?q=${encodeURIComponent(q)}`)
+    }
+    if (!res.ok) throw new Error('검색 실패')
+    const data = await res.json()
+    allSongs.value = Array.isArray(data) ? data : (data.results || [])
+  } catch (e) {
+    error.value = e.message
+    allSongs.value = []
+  } finally {
+    loading.value = false
   }
 }
 
-function onUploaded(sheet) {
-  showUpload.value = false
-  emit('uploaded', sheet)
+function toggleFolder(key) {
+  openFolder.value = openFolder.value === key ? null : key
 }
 
-onMounted(() => search())
+onMounted(() => {
+  searched.value = false
+  loadAll()
+})
 </script>
 
 <template>
   <section class="home">
-    <h2>내 악보 찾기</h2>
-    <form class="search-row" @submit.prevent="search()">
-      <input v-model="query" type="search" placeholder="제목 또는 공유 토큰 검색" />
+    <h2>곡 찾아보기</h2>
+    <p class="lead">제목으로 검색하거나 폴더에서 고르세요.</p>
+
+    <form class="search-row" @submit.prevent="search">
+      <input
+        v-model="query"
+        type="search"
+        placeholder="곡 제목 검색"
+        autocomplete="off"
+      />
       <button type="submit" :disabled="loading">검색</button>
     </form>
 
-    <h3 class="sub">최근 업로드</h3>
+    <!-- 검색 후에만: 결과 없음 또는 원하는 곡이 없을 때 업로드 -->
+    <div v-if="searched" class="after-search">
+      <p v-if="!loading && !allSongs.length" class="empty-msg">
+        「{{ query || '검색어' }}」에 해당하는 곡이 없습니다.
+      </p>
+      <p v-else-if="!loading && allSongs.length" class="hint-msg">
+        원하는 곡이 없나요? (제목은 같아도 다른 악보일 수 있어요)
+      </p>
+      <button
+        v-if="!loading"
+        type="button"
+        class="upload-link"
+        @click="emit('go-upload', query)"
+      >
+        + 새 악보 업로드
+      </button>
+    </div>
+
     <p v-if="loading" class="muted">불러오는 중…</p>
     <p v-else-if="error" class="error">{{ error }}</p>
-    <p v-else-if="!results.length" class="muted">저장된 악보가 없습니다.</p>
-    <ul v-else class="sheet-list">
-      <li v-for="s in results" :key="s.id" class="sheet-row">
-        <button type="button" class="sheet-item" @click="emit('open', s)">
-          <span class="title">{{ s.title || '제목 없음' }}</span>
-          <span class="meta">{{ s.share_token }} · {{ (s.updated_at || '').slice(0, 10) }}</span>
-        </button>
-        <button type="button" class="del-btn" @click="deleteSheet(s, $event)">삭제</button>
-      </li>
-    </ul>
 
-    <div class="divider">또는</div>
-    <button v-if="!showUpload" type="button" class="new-btn" @click="showUpload = true">+ 새 악보 업로드</button>
-    <UploadScore v-else @uploaded="onUploaded" />
+    <template v-else>
+      <h3 class="sub">전체 폴더 ({{ allSongs.length }}곡)</h3>
+
+      <p v-if="!folders.length && !searched" class="muted">
+        저장된 곡이 없습니다. 검색 후 새 악보를 업로드할 수 있습니다.
+      </p>
+
+      <ul v-else-if="folders.length" class="folder-list">
+        <li v-for="f in folders" :key="f.key" class="folder">
+          <button type="button" class="folder-head" @click="toggleFolder(f.key)">
+            <span class="cho">{{ f.key }}</span>
+            <span class="fname">{{ f.key }} ({{ f.count }}곡)</span>
+            <span class="chev">{{ openFolder === f.key ? '▾' : '▸' }}</span>
+          </button>
+          <ul v-if="openFolder === f.key" class="song-list">
+            <li v-for="s in f.songs" :key="s.id">
+              <button type="button" class="song-item" @click="emit('open', s)">
+                <span class="title">{{ s.title || '제목 없음' }}</span>
+                <span class="meta" v-if="variantCount(s)">
+                  코드 {{ variantCount(s) }}
+                </span>
+              </button>
+            </li>
+          </ul>
+        </li>
+      </ul>
+    </template>
   </section>
 </template>
 
 <style scoped>
-.home h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
-.sub { margin: 0.5rem 0; font-size: 0.95rem; color: #555; }
-.search-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-.search-row input { flex: 1; padding: 0.6rem 0.8rem; border: 1px solid #ccc; border-radius: 8px; }
-.search-row button { padding: 0.6rem 1rem; border: none; border-radius: 8px; background: #1a1a2e; color: #fff; cursor: pointer; }
-.sheet-list { list-style: none; padding: 0; margin: 0 0 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
-.sheet-row { display: flex; gap: 0.4rem; }
-.sheet-item {
-  flex: 1; text-align: left; padding: 0.75rem 1rem; border: 1px solid #e0e0e0;
-  border-radius: 8px; background: #fff; cursor: pointer; display: flex; flex-direction: column; gap: 0.2rem;
+.home h2 { margin: 0 0 0.35rem; font-size: 1.25rem; }
+.lead { margin: 0 0 1rem; color: #666; font-size: 0.9rem; }
+.search-row { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+.search-row input {
+  flex: 1; padding: 0.65rem 0.85rem; border: 1px solid #ccc;
+  border-radius: 8px; font-size: 1rem;
 }
-.sheet-item:hover { border-color: #0d6efd; background: #f8faff; }
-.title { font-weight: 700; }
-.meta { font-size: 0.8rem; color: #777; }
-.del-btn {
-  padding: 0 0.75rem; border: 1px solid #f0c0c0; border-radius: 8px;
-  background: #fff5f5; color: #c00; cursor: pointer; font-size: 0.85rem;
+.search-row button {
+  padding: 0.65rem 1.1rem; border: none; border-radius: 8px;
+  background: #1a1a2e; color: #fff; cursor: pointer; font-weight: 600;
 }
-.divider { text-align: center; color: #999; margin: 1rem 0; }
-.new-btn {
-  width: 100%; padding: 0.85rem; border: 2px dashed #0d6efd; border-radius: 10px;
-  background: #f0f6ff; color: #0d6efd; font-weight: 700; cursor: pointer;
+.after-search {
+  margin-bottom: 1.25rem;
+  padding: 0.85rem;
+  background: #f8faff;
+  border: 1px solid #d0e0ff;
+  border-radius: 10px;
 }
+.empty-msg { margin: 0 0 0.6rem; color: #555; font-weight: 600; }
+.hint-msg { margin: 0 0 0.6rem; color: #666; font-size: 0.9rem; }
+.upload-link {
+  width: 100%; padding: 0.7rem;
+  border: 2px dashed #0d6efd; border-radius: 10px;
+  background: #fff; color: #0d6efd; font-weight: 700; cursor: pointer;
+}
+.sub { margin: 0 0 0.6rem; font-size: 0.95rem; color: #444; font-weight: 700; }
+.folder-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.folder-head {
+  width: 100%; display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.65rem 0.85rem; border: 1px solid #e5e5e5; border-radius: 8px;
+  background: #fafafa; cursor: pointer; text-align: left;
+}
+.folder-head:hover { border-color: #0d6efd; background: #f8faff; }
+.cho {
+  width: 1.8rem; height: 1.8rem; display: flex; align-items: center; justify-content: center;
+  background: #1a1a2e; color: #fff; border-radius: 6px; font-weight: 800; font-size: 0.95rem;
+}
+.fname { flex: 1; font-weight: 600; color: #333; }
+.chev { color: #999; }
+.song-list {
+  list-style: none; padding: 0.35rem 0 0.35rem 1.5rem; margin: 0;
+  display: flex; flex-direction: column; gap: 0.3rem;
+}
+.song-item {
+  width: 100%; text-align: left; padding: 0.55rem 0.75rem;
+  border: 1px solid #eee; border-radius: 6px; background: #fff; cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+}
+.song-item:hover { border-color: #0d6efd; background: #f8faff; }
+.title { font-weight: 600; }
+.meta { font-size: 0.8rem; color: #888; }
 .muted { color: #888; }
 .error { color: #c00; }
 </style>

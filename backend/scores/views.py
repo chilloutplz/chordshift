@@ -55,7 +55,9 @@ class ScoreSheetViewSet(viewsets.ModelViewSet):
         if run_ocr and sheet.optimized_image:
             try:
                 from .utils.ocr import run_ocr as do_ocr
-                ocr_result = do_ocr(sheet.optimized_image.path)
+                from .utils.file_local import local_image_path
+                with local_image_path(sheet.optimized_image) as _p:
+                    ocr_result = do_ocr(_p)
                 sheet.ocr_raw_text = ocr_result.get('raw_text', '')
                 sheet.chords = ocr_result.get('chords', [])
                 sheet.save(update_fields=['ocr_raw_text', 'chords', 'updated_at'])
@@ -77,7 +79,9 @@ class ScoreSheetViewSet(viewsets.ModelViewSet):
 
         try:
             from .utils.ocr import run_ocr as do_ocr
-            result = do_ocr(sheet.optimized_image.path)
+            from .utils.file_local import local_image_path
+            with local_image_path(sheet.optimized_image) as _p:
+                result = do_ocr(_p)
         except Exception as e:
             import traceback
             return Response(
@@ -169,7 +173,9 @@ class ScoreSheetViewSet(viewsets.ModelViewSet):
 
         try:
             from .utils.render_sheet import render_transposed_sheet
-            content = render_transposed_sheet(sheet.optimized_image.path, render_chords)
+            from .utils.file_local import local_image_path
+            with local_image_path(sheet.optimized_image) as _p:
+                content = render_transposed_sheet(_p, render_chords)
         except Exception as e:
             return Response({'error': f'렌더 실패: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

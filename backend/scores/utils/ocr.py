@@ -296,10 +296,10 @@ def group_hits_into_lines(hits: list) -> list:
                 't': round(t, 5),
             })
         # 표시 보정: 대략 한글자만큼 오른쪽·아래로
-        OX, OY = 0.012, 0.010
+        OX, OY = 0.018, -0.016  # 오른쪽으로 약간, 위로 코드 하나 크기
         lines_out.append({
             'id': 'L' + uuid.uuid4().hex[:6],
-            'y': round(min(0.98, y + OY), 5),
+            'y': round(min(0.98, max(0.02, y + OY)), 5),
             'xStart': round(min(0.9, x_start + OX), 5),
             'xEnd': round(min(0.99, x_end + OX), 5),
             'height': 0.028,

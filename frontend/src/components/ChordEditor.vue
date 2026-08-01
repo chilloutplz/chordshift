@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   sheet: { type: Object, required: true },
@@ -21,7 +21,6 @@ const VARIANTS = {
 const lines = ref([])
 const semitones = ref(0)
 const saving = ref(false)
-const ocrLoading = ref(false)
 const confirming = ref(false)
 const message = ref('')
 const editKey = ref(null)
@@ -33,7 +32,30 @@ const stageRef = ref(null)
 const drag = ref(null)
 const chordFontPx = ref(13)
 const selectedRoot = ref(null)
-const uiMode = ref('layout') // 'layout' | 'refine'
+const dupCandidates = ref([])
+
+function keyLabelFromLines(linesArr, semitones = 0) {
+  const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+  const map = Object.fromEntries(NOTES.map((n,i)=>[n,i]))
+  map['Db']=1; map['Eb']=3; map['Gb']=6; map['Ab']=8; map['Bb']=10
+  let name = 'C'
+  if (Array.isArray(linesArr) && linesArr[0]?.items?.[0]?.chord) name = linesArr[0].items[0].chord
+  const m = String(name).match(/^([A-Ga-g])([#b]?)/)
+  if (!m) return 'C코드'
+  const root = m[1].toUpperCase() + (m[2] || '')
+  const idx = map[root]
+  if (idx === undefined) return `${root}코드`
+  const out = NOTES[(idx + (semitones % 12) + 12) % 12]
+  return `${out}코드`
+}
+
+function isTemp() {
+  return !!(props.sheet.is_temp || props.sheet.temp_id)
+}
+function sheetId() {
+  return props.sheet.temp_id || props.sheet.id
+}
+
 
 const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 const NOTE_IDX = Object.fromEntries(NOTES.map((n,i)=>[n,i]))
@@ -145,12 +167,25 @@ function normFromEvent(e) {
 }
 
 function startDrag(e, type, lineId, itemId = null) {
-  // 삽입 모드에서는 코드 이동 금지 (배치만)
-  if (uiMode.value === 'refine' && (type === 'chord-x' || type.startsWith('line-'))) return
+  // 코드 선택(삽입) 중에는 드래그보다 클릭 삽입 우선
+  if (placeChord.value) return
   e.preventDefault()
   e.stopPropagation()
   activeLineId.value = lineId
-  drag.value = { type, lineId, itemId, moved: false }
+  const line0 = lines.value.find((L) => L.id === lineId)
+  const pos0 = normFromEvent(e)
+  drag.value = {
+    type,
+    lineId,
+    itemId,
+    moved: false,
+    // 코드줄 전체 이동용 시작 스냅샷
+    startX: pos0?.x ?? 0,
+    startY: pos0?.y ?? 0,
+    origY: line0?.y ?? 0,
+    origXStart: line0?.xStart ?? 0.08,
+    origXEnd: line0?.xEnd ?? 0.92,
+  }
   const onMove = (ev) => {
     const pos = normFromEvent(ev)
     if (!pos || !drag.value) return
@@ -158,8 +193,25 @@ function startDrag(e, type, lineId, itemId = null) {
     const line = lines.value.find((L) => L.id === drag.value.lineId)
     if (!line) return
     const t = drag.value.type
-    if (t === 'line-y') line.y = pos.y
-    else if (t === 'line-h-top') {
+    if (t === 'line-y' || t === 'line-body') {
+      // 코드줄 전체 이동 (안의 코드 t는 상대값이므로 함께 이동)
+      const dx = pos.x - drag.value.startX
+      const dy = pos.y - drag.value.startY
+      const span = drag.value.origXEnd - drag.value.origXStart
+      let ns = drag.value.origXStart + dx
+      let ne = drag.value.origXEnd + dx
+      if (ns < 0.01) {
+        ne = 0.01 + span
+        ns = 0.01
+      }
+      if (ne > 0.99) {
+        ns = 0.99 - span
+        ne = 0.99
+      }
+      line.xStart = ns
+      line.xEnd = ne
+      line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
+    } else if (t === 'line-h-top') {
       const bottom = line.y + (line.height || 0.032) / 2
       const top = Math.min(bottom - 0.012, pos.y)
       line.height = Math.max(0.012, bottom - top)
@@ -190,51 +242,76 @@ function startDrag(e, type, lineId, itemId = null) {
   window.addEventListener('pointerup', onUp)
 }
 
+function onLineBodyDown(e, line) {
+  if (placeChord.value) return
+  if (e.target !== e.currentTarget && !e.target.classList?.contains('items-layer')) return
+  startDrag(e, 'line-body', line.id)
+}
+
 function onStageClick(e) {
-  if (uiMode.value !== 'layout' || !placeChord.value) return
+  if (!placeChord.value) return
   const pos = normFromEvent(e)
   if (!pos) return
-  let best = null
-  let bestDist = Infinity
-  for (const L of lines.value) {
-    const d = Math.abs((L.y || 0) - pos.y)
-    if (d < bestDist) { bestDist = d; best = L }
-  }
   const ch = placeChord.value
-  if (best && bestDist < 0.045) {
-    const span = best.xEnd - best.xStart
-    const t = span > 0 ? Math.min(0.98, Math.max(0.02, (pos.x - best.xStart) / span)) : 0.5
-    best.items.push({ id: 'n' + Date.now().toString(36), chord: ch, t })
-    activeLineId.value = best.id
-  } else {
-    const line = {
-      id: 'L' + Date.now().toString(36),
-      y: pos.y, xStart: 0.08, xEnd: 0.92, height: 0.032,
-      items: [{ id: 'n' + Date.now().toString(36), chord: ch, t: 0.5 }],
+
+  // 기존 코드줄이 있으면 가장 가까운 줄에만 삽입 (새 줄 자동 생성 안 함)
+  if (lines.value.length) {
+    let best = null
+    let bestDist = Infinity
+    for (const L of lines.value) {
+      const d = Math.abs((L.y || 0) - pos.y)
+      if (d < bestDist) { bestDist = d; best = L }
     }
-    lines.value.push(line)
-    activeLineId.value = line.id
+    // active 줄이 있으면 우선
+    const active = lines.value.find((L) => L.id === activeLineId.value)
+    const target = active || best
+    if (!target) return
+    const span = (target.xEnd - target.xStart) || 0.8
+    const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - target.xStart) / span))
+    target.items.push({ id: 'n' + Date.now().toString(36), chord: ch, t: tNorm })
+    activeLineId.value = target.id
+    message.value = `"${ch}" 코드줄에 삽입`
+    saveLines()
+    return
   }
-  message.value = `"${ch}" 삽입됨`
+
+  // 코드줄이 하나도 없을 때만 새 줄 생성
+  const line = {
+    id: 'L' + Date.now().toString(36),
+    y: pos.y, xStart: 0.08, xEnd: 0.92, height: 0.032,
+    items: [{ id: 'n' + Date.now().toString(36), chord: ch, t: 0.5 }],
+  }
+  lines.value.push(line)
+  activeLineId.value = line.id
+  message.value = `"${ch}" 새 코드줄에 삽입`
   saveLines()
 }
 
 function onLineClick(e, line) {
   e.stopPropagation()
-  activeLineId.value = line.id
-  if (uiMode.value !== 'layout' || !placeChord.value) return
+  // displayLines는 복사본이므로 반드시 lines 원본을 수정
+  const L = lines.value.find((x) => x.id === line.id) || line
+  activeLineId.value = L.id
+  if (!placeChord.value) return
   const pos = normFromEvent(e)
   if (!pos) return
-  const span = line.xEnd - line.xStart
-  const t = span > 0 ? Math.min(0.98, Math.max(0.02, (pos.x - line.xStart) / span)) : 0.5
-  line.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t })
-  message.value = `"${placeChord.value}" 줄에 삽입`
+  if (!Array.isArray(L.items)) L.items = []
+  const span = (L.xEnd - L.xStart) || 0.8
+  const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - L.xStart) / span))
+  L.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t: tNorm })
+  message.value = `"${placeChord.value}" 코드줄에 삽입`
   saveLines()
+}
+
+function onChipClick(e, line, item) {
+  e.stopPropagation()
+  if (placeChord.value) {
+    onLineClick(e, line)
+  }
 }
 
 function startEdit(lineId, item) {
   editKey.value = `${lineId}:${item.id}`
-  // 조옮김 표시값이 아닌 원본(base) 코드 편집
   const L = lines.value.find(x => x.id === lineId)
   const it = L?.items?.find(x => x.id === item.id)
   editValue.value = it?.chord || item.chord || ''
@@ -260,26 +337,30 @@ function removeItem(line, itemId) {
 function pickRoot(root) { selectedRoot.value = root; placeChord.value = '' }
 function pickVariant(ch) {
   placeChord.value = ch
-  uiMode.value = 'layout'
-  message.value = `"${ch}" 선택 · 악보/줄 클릭으로 배치`
+  message.value = `"${ch}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
 }
 function pickCustom() {
   const ch = customChord.value.trim()
   if (!ch) return
   placeChord.value = ch
-  uiMode.value = 'layout'
-  message.value = `"${ch}" 선택 · 악보/줄 클릭으로 배치`
+  message.value = `"${ch}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
 }
 function clearPlace() { placeChord.value = ''; message.value = '' }
-function setLayoutMode() {
-  uiMode.value = 'layout'
-  message.value = '배치: 코드 선택 후 클릭 삽입 · 드래그로 위치 조정'
+
+function onKeydownEsc(e) {
+  if (e.key === 'Escape' || e.key === 'Esc') {
+    if (placeChord.value) {
+      clearPlace()
+      e.preventDefault()
+    } else if (editKey.value) {
+      editKey.value = null
+      e.preventDefault()
+    }
+  }
 }
-function setRefineMode() {
-  placeChord.value = ''
-  uiMode.value = 'refine'
-  message.value = '수정: 코드 이름 클릭 편집 · × 삭제 (삽입 없음)'
-}
+
+onMounted(() => window.addEventListener('keydown', onKeydownEsc))
+onUnmounted(() => window.removeEventListener('keydown', onKeydownEsc))
 function addEmptyLine() {
   const line = {
     id: 'L' + Date.now().toString(36),
@@ -289,13 +370,6 @@ function addEmptyLine() {
   lines.value.push(line)
   activeLineId.value = line.id
 }
-function redistribute(line) {
-  const L = lines.value.find(x => x.id === line.id)
-  if (!L) return
-  const n = Math.max(L.items.length, 1)
-  L.items = L.items.map((it, i) => ({ ...it, t: (i + 0.5) / n }))
-  saveLines()
-}
 function bumpFont(delta) {
   chordFontPx.value = Math.min(22, Math.max(9, chordFontPx.value + delta))
 }
@@ -303,13 +377,23 @@ function bumpFont(delta) {
 async function saveLines() {
   saving.value = true
   try {
-    const res = await fetch(`/api/scores/${props.sheet.id}/update_chords/`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chords: lines.value }),
-    })
+    let res
+    if (isTemp()) {
+      res = await fetch(`/api/temp/${sheetId()}/chords/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chords: lines.value }),
+      })
+    } else {
+      res = await fetch(`/api/songs/${props.sheet.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chords: lines.value }),
+      })
+    }
     if (!res.ok) throw new Error('저장 실패')
-    emit('updated', await res.json())
+    const data = await res.json()
+    emit('updated', { ...props.sheet, ...data, chords: data.chords ?? lines.value })
   } catch (e) { message.value = e.message }
   finally { saving.value = false }
 }
@@ -333,81 +417,136 @@ async function doTranspose(delta) {
   finally { saving.value = false }
 }
 
-async function saveBase() {
-  // 보정된 원본(위치·코드) 명시 저장, 조옮김 0으로
+async function saveBase(mergeSongId = null, forceNew = false) {
   saving.value = true
+  message.value = ''
+  dupCandidates.value = []
   try {
-    const res = await fetch(`/api/scores/${props.sheet.id}/update_chords/`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chords: lines.value }),
-    })
-    if (!res.ok) throw new Error('저장 실패')
-    await fetch(`/api/scores/${props.sheet.id}/transpose/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ semitones: 0 }),
-    })
-    semitones.value = 0
-    emit('updated', await res.json())
-    message.value = '보정본 저장됨 · 다음에 이어서 작업 가능'
+    if (isTemp()) {
+      const body = {
+        temp_id: sheetId(),
+        title: props.sheet.title || '',
+        chords: lines.value,
+        force_new: forceNew,
+      }
+      if (mergeSongId) body.merge_song_id = mergeSongId
+      const res = await fetch('/api/songs/from-temp/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.status === 409 && data.error === 'duplicate_title') {
+        dupCandidates.value = data.candidates || []
+        message.value = data.message || '같은 제목의 곡이 있습니다'
+        return
+      }
+      if (!res.ok) throw new Error(data.error || '보정본 저장 실패')
+      emit('updated', { ...data, is_temp: false })
+      message.value = '보정본 저장됨 (DB 등록)'
+    } else {
+      const res = await fetch(`/api/songs/${props.sheet.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chords: lines.value }),
+      })
+      if (!res.ok) throw new Error('저장 실패')
+      emit('updated', await res.json())
+      message.value = '보정본 저장됨'
+    }
   } catch (e) { message.value = e.message }
   finally { saving.value = false }
 }
 
-async function runOcr() {
-  ocrLoading.value = true
-  message.value = ''
-  try {
-    const res = await fetch(`/api/scores/${props.sheet.id}/ocr/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apply_chords: true }),
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || 'OCR 실패')
-    }
-    emit('updated', await res.json())
-    message.value = 'OCR 완료'
-  } catch (e) { message.value = e.message }
-  finally { ocrLoading.value = false }
-}
 
 async function confirmSheet() {
   confirming.value = true
-  message.value = ''
+  message.value = '확정 처리 중…'
   try {
     await saveLines()
-    // 확정 시에는 화면에 보이는(조옮김 반영) 코드로 렌더
-    const res = await fetch(`/api/scores/${props.sheet.id}/confirm/`, {
+
+    let song = { ...props.sheet }
+
+    // 임시 업로드면 확정과 함께 DB 등록 (보정본 저장)
+    if (isTemp()) {
+      const body = {
+        temp_id: sheetId(),
+        title: props.sheet.title || '',
+        chords: lines.value,
+        force_new: true,
+      }
+      let res = await fetch('/api/songs/from-temp/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      let data = await res.json().catch(() => ({}))
+      if (res.status === 409 && data.error === 'duplicate_title') {
+        // 확정 흐름에서는 새 곡으로 강제 저장
+        body.force_new = true
+        res = await fetch('/api/songs/from-temp/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        data = await res.json().catch(() => ({}))
+      }
+      if (!res.ok) {
+        // Song API 미적용 환경 → 구 API 시도하지 않고 안내
+        throw new Error(data.error || data.message || '보정본 저장 실패. migrate / 서버 재시작을 확인하세요.')
+      }
+      song = { ...data, is_temp: false }
+      emit('updated', song)
+    }
+
+    const songId = song.id
+    if (!songId) throw new Error('곡 ID가 없습니다')
+
+    // 수정본 이미지 렌더 (Song API)
+    let res = await fetch(`/api/songs/${songId}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chords: displayLines.value }),
+      body: JSON.stringify({
+        semitones: 0,
+        chords: lines.value,
+        label: keyLabelFromLines(lines.value, 0),
+      }),
     })
+
+    // 구 ScoreSheet API 폴백
+    if (res.status === 404) {
+      res = await fetch(`/api/scores/${songId}/confirm/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chords: lines.value }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || '확정 실패')
+      }
+      const data = await res.json()
+      emit('updated', data)
+      message.value = '확정됨 · 조옮김 단계로 이동'
+      emit('next', data)
+      return
+    }
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || '확정 실패')
     }
     const data = await res.json()
-    emit('updated', data)
-    message.value = '확정됨 · 조옮김 단계로 이동합니다'
-    emit('next', data)
-  } catch (e) { message.value = e.message }
-  finally { confirming.value = false }
-}
-
-async function deleteThis() {
-  const name = props.sheet.title || props.sheet.share_token || '이 악보'
-  if (!confirm(`"${name}" 을(를) 삭제할까요?\n이미지 파일과 데이터가 모두 삭제됩니다.`)) return
-  try {
-    const res = await fetch(`/api/scores/${props.sheet.id}/`, { method: 'DELETE' })
-    if (!res.ok && res.status !== 204) throw new Error('삭제 실패')
-    emit('back')
+    song = data.song || data
+    emit('updated', song)
+    message.value = '확정됨 · 조옮김 단계로 이동'
+    emit('next', song)
   } catch (e) {
-    message.value = e.message || '삭제 실패'
+    message.value = e.message || '확정 실패'
+  } finally {
+    confirming.value = false
   }
 }
+
 
 const imageUrl = computed(() => {
   const u = props.sheet.optimized_image
@@ -425,18 +564,14 @@ const resultUrl = computed(() => {
   <div class="editor">
     <div class="top-actions">
       <button class="back" @click="emit('back')">← 목록</button>
-      <button type="button" class="delete-sheet" @click="deleteThis">악보 삭제</button>
     </div>
     <h2>{{ sheet.title || '제목 없음' }}</h2>
-    <p class="meta">공유: <code>{{ sheet.share_token }}</code> · 조옮김: {{ semitones > 0 ? '+' : '' }}{{ semitones }}</p>
-    <p class="hint">
-      <b>1. 배치</b>: 코드 선택→클릭 삽입 · 드래그로 위치/줄 크기 조정<br />
-      <b>2. 수정</b>: 이름 편집·삭제만 (실수 삽입 방지) · 보정본 저장 후 조옮김
-    </p>
-    <div class="mode-bar">
-      <button type="button" :class="{ on: uiMode === 'layout' }" @click="setLayoutMode">1. 배치</button>
-      <button type="button" :class="{ on: uiMode === 'refine' }" @click="setRefineMode">2. 수정</button>
-      <button type="button" class="save-base" @click="saveBase" :disabled="saving">보정본 저장</button>
+    <div v-if="dupCandidates.length" class="dup-box">
+      <p>같은 제목의 곡이 있습니다. 선택하세요:</p>
+      <button v-for="c in dupCandidates" :key="c.id" type="button" @click="saveBase(c.id)">
+        「{{ c.title }}」에 합치기 (코드 {{ (c.variants || []).length }})
+      </button>
+      <button type="button" class="force" @click="saveBase(null, true)">새 곡으로 저장</button>
     </div>
     <div class="size-bar">
       <span>코드 크기</span>
@@ -444,33 +579,49 @@ const resultUrl = computed(() => {
       <span class="size-val">{{ chordFontPx }}px</span>
       <button type="button" @click="bumpFont(1)">A+</button>
     </div>
-    <div ref="stageRef" class="stage" :class="{ placing: uiMode === 'layout' && !!placeChord }" v-if="sheet.optimized_image" @click="onStageClick">
+    <div class="stage-frame" v-if="sheet.optimized_image">
+    <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" @click="onStageClick">
       <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
-      <div v-for="line in displayLines" :key="line.id" class="chord-line" :class="{ active: activeLineId === line.id }" :style="lineStyle(line)" @click="onLineClick($event, line)">
+      <div
+        v-for="line in displayLines"
+        :key="line.id"
+        class="chord-line"
+        :class="{ active: activeLineId === line.id }"
+        :style="lineStyle(line)"
+        @click="onLineClick($event, line)"
+        @pointerdown="onLineBodyDown($event, line)"
+      >
         <div class="handle left" @pointerdown="startDrag($event, 'line-left', line.id)" />
         <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
         <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
         <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
-        <button class="line-move" title="세로 이동" @pointerdown="startDrag($event, 'line-y', line.id)" @click.stop>⋮⋮</button>
         <div class="items-layer">
-          <div v-for="item in line.items" :key="item.id" class="chip" :style="{ left: chordLeftPct(line, item), fontSize: chordFontPx + 'px' }" @pointerdown="startDrag($event, 'chord-x', line.id, item.id)">
+          <div
+            v-for="item in line.items"
+            :key="item.id"
+            class="chip"
+            :style="{ left: chordLeftPct(line, item), fontSize: chordFontPx + 'px' }"
+            @pointerdown="startDrag($event, 'chord-x', line.id, item.id)"
+            @click="onChipClick($event, line, item)"
+            @dblclick.stop="startEdit(line.id, item)"
+          >
             <template v-if="editKey === line.id + ':' + item.id">
-              <input v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop />
+              <input v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
             </template>
             <template v-else>
-              <span @click.stop="startEdit(line.id, item)">{{ item.chord }}</span>
+              <span>{{ item.chord }}</span>
               <button class="x" @click.stop="removeItem(line, item.id)" @pointerdown.stop>×</button>
             </template>
           </div>
         </div>
-        <button type="button" class="redistribute" title="균등 재배치" @click.stop="redistribute(line)">⇄</button>
       </div>
       <div v-if="placeChord" class="place-banner" @click.stop>
-        「{{ placeChord }}」 배치 모드 — 악보·줄을 클릭 ·
+        「{{ placeChord }}」 선택됨 — 코드줄 클릭으로 삽입 · Esc 취소
         <button type="button" @click="clearPlace">취소</button>
       </div>
     </div>
-    <section class="palette" v-if="uiMode === 'layout'">
+    </div>
+    <section class="palette">
       <h3>코드 선택</h3>
       <div class="roots">
         <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
@@ -484,9 +635,6 @@ const resultUrl = computed(() => {
         <button type="button" class="act ghost" @click="addEmptyLine">+ 새 줄</button>
       </div>
     </section>
-    <div class="toolbar">
-      <button class="ocr" :disabled="ocrLoading" @click="runOcr">{{ ocrLoading ? 'OCR 중…' : 'PaddleOCR 실행' }}</button>
-    </div>
     <section class="transpose" v-if="pageMode !== 'correct'">
       <h3>조옮김</h3>
       <div class="btns">
@@ -513,36 +661,110 @@ const resultUrl = computed(() => {
 .editor { display: flex; flex-direction: column; gap: 1rem; max-width: 920px; margin: 0 auto; }
 .top-actions { display: flex; justify-content: space-between; align-items: center; }
 .back { background: none; border: none; cursor: pointer; color: #1a1a2e; }
-.delete-sheet {
-  border: 1px solid #f0c0c0; background: #fff5f5; color: #c00;
-  border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer; font-size: 0.85rem;
-}
-.delete-sheet:hover { background: #c00; color: #fff; }
 .meta { font-size: 0.85rem; color: #666; }
 .hint { font-size: 0.85rem; color: #444; background: #f5f7fa; padding: 0.6rem 0.8rem; border-radius: 6px; line-height: 1.5; }
 .mode-bar { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .mode-bar button { padding: 0.4rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-weight: 600; }
 .mode-bar button.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
 .mode-bar .save-base { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
+.dup-box { background: #fff8e6; border: 1px solid #e6c200; border-radius: 8px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.dup-box button { text-align: left; padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
+.dup-box .force { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
 .size-bar { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
 .size-bar button { padding: 0.25rem 0.55rem; border: 1px solid #ccc; border-radius: 5px; background: #fff; cursor: pointer; font-weight: 700; }
 .size-val { min-width: 2.5rem; text-align: center; font-weight: 600; }
-.stage { position: relative; width: 100%; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background: #fff; user-select: none; touch-action: none; }
-.stage.placing { cursor: crosshair; outline: 2px solid #0d6efd; }
-.score-img { display: block; width: 100%; height: auto; pointer-events: none; }
-.chord-line { position: absolute; box-sizing: border-box; background: rgba(255, 250, 180, 0.32); border: 1px dashed rgba(180, 150, 0, 0.5); border-radius: 4px; z-index: 2; min-height: 18px; }
-.chord-line.active { background: rgba(255, 235, 100, 0.4); border-color: #0d6efd; border-style: solid; }
-.handle { position: absolute; z-index: 4; background: rgba(13, 110, 253, 0.35); }
-.handle.left { left: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; }
-.handle.right { right: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; }
-.handle.top { top: -3px; left: 0; right: 0; height: 6px; cursor: ns-resize; }
-.handle.bottom { bottom: -3px; left: 0; right: 0; height: 6px; cursor: ns-resize; }
-.line-move { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); border: none; background: rgba(0,0,0,0.1); border-radius: 3px; padding: 2px 3px; font-size: 9px; cursor: grab; z-index: 3; color: #444; }
+.stage-frame {
+  width: 100%;
+  min-height: 360px;
+  max-height: 75vh;
+  overflow: auto;
+  background: #e8e8e8;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.stage {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  border: none;
+  background: #fff;
+  user-select: none;
+  touch-action: none;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.stage.placing { cursor: crosshair; outline: 2px solid #0d6efd; outline-offset: -2px; }
+.score-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  vertical-align: top;
+  pointer-events: none;
+}
+.chord-line {
+  position: absolute;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  /* 기본은 거의 안 보이게, 호버/선택 시에만 얇은 선 */
+  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.12);
+  border-radius: 2px;
+  z-index: 2;
+  min-height: 18px;
+  cursor: grab;
+}
+.chord-line:hover {
+  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.28);
+}
+.chord-line.active {
+  background: rgba(0, 180, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.4);
+}
+.chord-line:active { cursor: grabbing; }
+/* 핸들이 두꺼운 파란 테두리처럼 보이던 원인 → 기본 투명, 호버 시에만 */
+.handle {
+  position: absolute;
+  z-index: 4;
+  background: transparent;
+  opacity: 0;
+}
+.chord-line:hover .handle,
+.chord-line.active .handle {
+  opacity: 1;
+  background: rgba(13, 110, 253, 0.2);
+}
+.handle.left { left: -2px; top: 0; bottom: 0; width: 3px; cursor: ew-resize; }
+.handle.right { right: -2px; top: 0; bottom: 0; width: 3px; cursor: ew-resize; }
+.handle.top { top: -2px; left: 0; right: 0; height: 3px; cursor: ns-resize; }
+.handle.bottom { bottom: -2px; left: 0; right: 0; height: 3px; cursor: ns-resize; }
 .items-layer { position: absolute; inset: 0; pointer-events: none; }
-.chip { position: absolute; top: 50%; transform: translate(-50%, -50%); display: flex; align-items: center; font-weight: 700; color: #1a1a2e; background: rgba(255, 255, 255, 0.55); border-radius: 3px; padding: 0 2px 0 4px; pointer-events: auto; cursor: grab; white-space: nowrap; max-width: 5rem; }
+.chip {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  font-weight: 800;
+  color: #ff2d55;
+  text-shadow:
+    0 0 2px #fff,
+    0 0 3px #fff,
+    1px 0 0 #fff,
+    -1px 0 0 #fff,
+    0 1px 0 #fff,
+    0 -1px 0 #fff;
+  background: transparent;
+  border-radius: 3px;
+  padding: 0 2px 0 4px;
+  pointer-events: auto;
+  cursor: grab;
+  white-space: nowrap;
+  max-width: 5rem;
+}
 .chip input { width: 2.6rem; font-size: inherit; font-weight: 700; border: 1px solid #333; border-radius: 2px; padding: 0 2px; }
 .chip .x { border: none; background: transparent; color: #a00; cursor: pointer; font-size: 0.9em; padding: 0 1px; opacity: 0.55; }
-.redistribute { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); border: none; background: rgba(0,0,0,0.08); border-radius: 3px; font-size: 11px; padding: 1px 4px; cursor: pointer; z-index: 3; }
 .place-banner { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(13, 110, 253, 0.92); color: #fff; text-align: center; padding: 0.4rem; font-size: 0.9rem; z-index: 10; }
 .place-banner button { background: #fff; border: none; border-radius: 4px; padding: 2px 8px; margin-left: 6px; cursor: pointer; }
 .palette h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
@@ -556,7 +778,6 @@ const resultUrl = computed(() => {
 .custom-row input { flex: 1; min-width: 100px; padding: 0.4rem 0.55rem; border: 1px solid #ccc; border-radius: 6px; }
 .act { padding: 0.4rem 0.75rem; border: none; border-radius: 6px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.85rem; }
 .act.ghost { background: #fff; color: #1a1a2e; border: 1px solid #ccc; }
-.toolbar .ocr { padding: 0.55rem 1rem; background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
 .transpose .btns { display: flex; align-items: center; gap: 0.5rem; }
 .transpose button { padding: 0.5rem 0.9rem; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
 .current { min-width: 2.5rem; text-align: center; font-weight: 700; }
