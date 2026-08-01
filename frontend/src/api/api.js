@@ -11,7 +11,7 @@ import axios from 'axios'
  */
 
 // 백엔드 Base URL 설정
-const baseURL = import.meta.env.VITE_API_URL || ''
+const baseURL = import.meta.env.VITE_API_URL || '"http://localhost:8000/api"'
 
 const api = axios.create({
   baseURL: baseURL,
