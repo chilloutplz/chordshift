@@ -1,15 +1,19 @@
 """
 PaddleOCR → 줄(line) 단위 코드 그룹
 같은 높이(y)의 코드를 한 줄로 묶음
+PDX already initialized 에러 대응 패치
 """
 import os
 import re
 import uuid
+import threading
 from functools import lru_cache
 
+# 반드시 paddle import 전에 설정
 os.environ.setdefault('FLAGS_enable_pir_api', '0')
 os.environ.setdefault('FLAGS_use_mkldnn', '0')
 os.environ.setdefault('PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT', '0')
+os.environ.setdefault('DISABLE_MODEL_SOURCE_CHECK', 'True')
 
 CHORD_FULL = re.compile(
     r'^('
@@ -32,9 +36,9 @@ CHORD_IN_TEXT = re.compile(
     re.IGNORECASE,
 )
 
-# y 좌표가 이 값 이내면 같은 줄
 LINE_Y_THRESHOLD = 0.025
 
+_lock = threading.Lock()
 
 def _is_empty(obj) -> bool:
     if obj is None:
@@ -76,17 +80,21 @@ def _to_list(obj):
 
 @lru_cache(maxsize=1)
 def get_ocr_engine():
+    """
+    PDX already initialized 대응:
+    - enable_mkldnn 같은 구 파라미터 제거
+    - threading.Lock으로 동시 생성 방지
+    - 실패해도 lru_cache에 예외가 남지 않도록 내부에서 처리
+    """
     from paddleocr import PaddleOCR
-    kwargs = dict(
-        lang='en',
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-    )
-    try:
-        return PaddleOCR(**kwargs, enable_mkldnn=False)
-    except TypeError:
-        return PaddleOCR(**kwargs)
+    with _lock:
+        # 가장 호환성 높은 최소 옵션
+        return PaddleOCR(
+            lang='en',
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
 
 
 def _box_to_norm(box, img_w, img_h):
@@ -219,7 +227,6 @@ def _parse_ocr_result(result, img_w=None, img_h=None):
 
 
 def _flat_chord_hits(ocr_lines: list) -> list:
-    """OCR 라인 → 개별 코드 후보 {chord, x, y, conf}"""
     hits = []
     for line in ocr_lines:
         text = (line.get('text') or '').strip()
@@ -246,25 +253,11 @@ def _flat_chord_hits(ocr_lines: list) -> list:
 
 
 def group_hits_into_lines(hits: list) -> list:
-    """
-    y 기준으로 줄 묶기.
-    반환 형식 (chords JSON):
-    [
-      {
-        "id": "Lxxxx",
-        "y": 0.15,
-        "xStart": 0.08,
-        "xEnd": 0.92,
-        "items": [{"id": "...", "chord": "C"}, ...]
-      },
-      ...
-    ]
-    """
     if not hits:
         return []
 
     sorted_hits = sorted(hits, key=lambda h: (h.get('y', 0), h.get('x', 0)))
-    clusters = []  # list of list of hits
+    clusters = []
 
     for h in sorted_hits:
         placed = False
@@ -281,27 +274,28 @@ def group_hits_into_lines(hits: list) -> list:
     for cluster in clusters:
         cluster.sort(key=lambda c: c.get('x', 0))
         ys = [c['y'] for c in cluster]
-        xs = [c['x'] for c in cluster]
         y = sum(ys) / len(ys)
-        x_start = max(0.02, min(xs) - 0.02) if xs else 0.08
-        x_end = min(0.98, max(xs) + 0.08) if xs else 0.92
-        span = max(x_end - x_start, 0.01)
+        # 코드줄은 이미지 전체 너비로 고정
+        x_start = 0.01
+        x_end = 0.99
         items = []
         for c in cluster:
-            t = (c['x'] - x_start) / span
+            # 읽은 위치 + 두글자 오른쪽 보정
+            abs_x = max(0.02, min(0.96, c['x']))  # 오른쪽 여유 확보
+            abs_x = min(0.96, abs_x + 0.022)  # 두글자 크기만큼 오른쪽 (0.022 ≈ 2글자)
+            t = (abs_x - 0.01) / 0.98
             t = max(0.02, min(0.98, t))
             items.append({
                 'id': uuid.uuid4().hex[:8],
                 'chord': c['chord'],
                 't': round(t, 5),
             })
-        # 표시 보정: 대략 한글자만큼 오른쪽·아래로
-        OX, OY = 0.018, -0.016  # 오른쪽으로 약간, 위로 코드 하나 크기
+        OY = -0.016
         lines_out.append({
             'id': 'L' + uuid.uuid4().hex[:6],
             'y': round(min(0.98, max(0.02, y + OY)), 5),
-            'xStart': round(min(0.9, x_start + OX), 5),
-            'xEnd': round(min(0.99, x_end + OX), 5),
+            'xStart': x_start,
+            'xEnd': x_end,
             'height': 0.028,
             'items': items,
         })
@@ -320,7 +314,29 @@ def run_ocr(image_path: str) -> dict:
     except Exception:
         pass
 
-    ocr = get_ocr_engine()
+    # PDX already initialized 에러가 나도 기존 엔진 재사용 시도
+    try:
+        ocr = get_ocr_engine()
+    except Exception as e:
+        msg = str(e)
+        if 'already been initialized' in msg or 'PDX' in msg:
+            # 캐시 비우고 재시도 - 이미 초기화된 전역 객체를 쓰게 될 수도 있음
+            get_ocr_engine.cache_clear()
+            try:
+                ocr = get_ocr_engine()
+            except Exception as e2:
+                # 최후: 빈 결과 반환으로 업로드는 성공시키기
+                return {
+                    'raw_text': f'[OCR error] {e2}',
+                    'lines': [],
+                    'chord_lines': [],
+                    'chords': [],
+                    'chord_candidates': [],
+                    'image_size': {'width': img_w, 'height': img_h},
+                }
+        else:
+            raise
+
     result = None
     last_err = None
     for method in ('predict', 'ocr'):
@@ -328,6 +344,14 @@ def run_ocr(image_path: str) -> dict:
             result = getattr(ocr, method)(image_path)
             break
         except Exception as e:
+            # PDX 에러가 여기서 날 수도 있음
+            if 'already been initialized' in str(e):
+                # 이미 초기화된 경우, 캐시된 엔진이 실제로는 살아있을 수 있으니 다시 predict
+                try:
+                    result = ocr.predict(image_path)
+                    break
+                except Exception:
+                    pass
             last_err = e
             result = None
 
@@ -338,7 +362,6 @@ def run_ocr(image_path: str) -> dict:
     hits = _flat_chord_hits(ocr_lines)
     lines = group_hits_into_lines(hits)
 
-    # 하위 호환: flat 목록도 제공
     flat = []
     for L in lines:
         n = max(len(L['items']), 1)
@@ -360,8 +383,8 @@ def run_ocr(image_path: str) -> dict:
             {'text': l.get('text'), 'confidence': l.get('confidence'), 'norm': l.get('norm')}
             for l in ocr_lines
         ],
-        'chord_lines': lines,   # 줄 단위 (주 데이터)
-        'chords': lines,        # DB 저장용 — 줄 배열
+        'chord_lines': lines,
+        'chords': lines,
         'chord_candidates': [it['chord'] for L in lines for it in L['items']],
         'image_size': {'width': img_w, 'height': img_h},
     }

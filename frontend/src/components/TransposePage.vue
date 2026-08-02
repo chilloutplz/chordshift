@@ -50,10 +50,22 @@ function keyLabel(chords, semitones) {
 }
 
 
+function resolveImageUrl(u) {
+  if (!u) return ''
+  let url = String(u)
+  if (url.startsWith('/')) url = `${API_BASE}${url}`
+  if (url.includes('127.0.0.1') || url.includes('localhost')) {
+    url = url.replace('https://', 'http://')
+  } else if (url.startsWith('http://') && API_BASE.startsWith('https://')) {
+    url = url.replace('http://', 'https://')
+  }
+  return url
+}
 function withCache(url) {
   if (!url) return ''
-  const sep = url.includes('?') ? '&' : '?'
-  return url + sep + 't=' + Date.now()
+  const base = resolveImageUrl(url)
+  const sep = base.includes('?') ? '&' : '?'
+  return base + sep + 't=' + Date.now()
 }
 
 const semitones = ref(0)
@@ -86,7 +98,8 @@ watch(
 const resultUrl = computed(() => withCache(lastVariantUrl.value || props.sheet.result_image || ''))
 
 watch(resultUrl, (url) => {
-  imageLoading.value = !!url
+  // 강제 리로드를 위해 imageLoading은 showVariant에서만 제어
+  if (url) console.log('[img] resultUrl changed', url)
 }, { immediate: true })
 
 function onImageLoad() {
@@ -257,15 +270,16 @@ function showVariant(v) {
     <section v-if="resultUrl || rendering" class="result">
       <h3>결과 악보</h3>
       <div class="img-wrap">
-        <div v-if="rendering || imageLoading" class="img-loading">
+        <div v-if="rendering" class="img-loading">
           <div class="spinner"></div>
-          <p>{{ rendering ? '결과 악보를 생성·저장하는 중…' : '이미지를 불러오는 중…' }}</p>
+          <p>결과 악보를 생성·저장하는 중…</p>
         </div>
         <img
           v-if="resultUrl"
+          :key="resultUrl"
           :src="resultUrl"
           alt="결과 악보"
-          :class="{ dim: imageLoading || rendering }"
+          :class="{ dim: rendering }"
           @load="onImageLoad"
           @error="onImageError"
         />

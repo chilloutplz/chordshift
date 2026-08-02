@@ -95,8 +95,8 @@ function toLines(raw) {
     return raw.map((L, i) => ({
       id: L.id || `L${i}`,
       y: L.y ?? 0.1 + i * 0.08,
-      xStart: L.xStart ?? 0.08,
-      xEnd: L.xEnd ?? 0.92,
+      xStart: L.xStart ?? 0.01,
+      xEnd: L.xEnd ?? 0.99,
       height: L.height ?? 0.032,
       items: ensureItemT(
         (L.items || []).map((it, j) =>
@@ -113,7 +113,7 @@ function toLines(raw) {
       : { id: c.id || `f${j}`, chord: c.chord || '', t: c.t }
   )
   return [{
-    id: 'L0', y: 0.12, xStart: 0.08, xEnd: 0.92, height: 0.032,
+    id: 'L0', y: 0.12, xStart: 0.01, xEnd: 0.99, height: 0.032,
     items: ensureItemT(items),
   }]
 }
@@ -184,8 +184,9 @@ function startDrag(e, type, lineId, itemId = null) {
     startX: pos0?.x ?? 0,
     startY: pos0?.y ?? 0,
     origY: line0?.y ?? 0,
-    origXStart: line0?.xStart ?? 0.08,
-    origXEnd: line0?.xEnd ?? 0.92,
+    origXStart: line0?.xStart ?? 0.01,
+    origXEnd: line0?.xEnd ?? 0.99,
+    origAbs: null,
   }
   const onMove = (ev) => {
     const pos = normFromEvent(ev)
@@ -194,24 +195,31 @@ function startDrag(e, type, lineId, itemId = null) {
     const line = lines.value.find((L) => L.id === drag.value.lineId)
     if (!line) return
     const t = drag.value.type
+    // 절대 위치 보존을 위한 원본 절대 x 저장 (최초 드래그 시작 시)
+    if (!drag.value.origAbs) {
+      const span0 = drag.value.origXEnd - drag.value.origXStart
+      drag.value.origAbs = (line.items || []).map(it => {
+        const tt = typeof it.t === 'number' ? it.t : 0.5
+        return { id: it.id, abs: drag.value.origXStart + tt * span0 }
+      })
+    }
+    const restoreT = (newStart, newEnd) => {
+      const newSpan = newEnd - newStart
+      if (newSpan <= 0.001) return
+      for (const it of line.items) {
+        const saved = drag.value.origAbs.find(a => a.id === it.id)
+        if (!saved) continue
+        let nt = (saved.abs - newStart) / newSpan
+        it.t = Math.min(0.98, Math.max(0.02, nt))
+      }
+    }
+
     if (t === 'line-y' || t === 'line-body') {
-      // 코드줄 전체 이동 (안의 코드 t는 상대값이므로 함께 이동)
-      const dx = pos.x - drag.value.startX
+      // y 이동만, x 이동은 코드 절대위치 유지 (요청사항: 사이즈 움직여도 코드 위치 고정)
       const dy = pos.y - drag.value.startY
-      const span = drag.value.origXEnd - drag.value.origXStart
-      let ns = drag.value.origXStart + dx
-      let ne = drag.value.origXEnd + dx
-      if (ns < 0.01) {
-        ne = 0.01 + span
-        ns = 0.01
-      }
-      if (ne > 0.99) {
-        ns = 0.99 - span
-        ne = 0.99
-      }
-      line.xStart = ns
-      line.xEnd = ne
       line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
+      // x는 고정 - 코드 절대위치 보존 (이동시키고 싶으면 아래 2줄 주석 해제)
+      // const dx = pos.x - drag.value.startX ...
     } else if (t === 'line-h-top') {
       const bottom = line.y + (line.height || 0.032) / 2
       const top = Math.min(bottom - 0.012, pos.y)
@@ -222,8 +230,15 @@ function startDrag(e, type, lineId, itemId = null) {
       const bottom = Math.max(top + 0.012, pos.y)
       line.height = Math.max(0.012, bottom - top)
       line.y = (top + bottom) / 2
-    } else if (t === 'line-left') line.xStart = Math.min(line.xEnd - 0.08, pos.x)
-    else if (t === 'line-right') line.xEnd = Math.max(line.xStart + 0.08, pos.x)
+    } else if (t === 'line-left') {
+      const newStart = Math.min(line.xEnd - 0.08, pos.x)
+      restoreT(newStart, line.xEnd)
+      line.xStart = newStart
+    } else if (t === 'line-right') {
+      const newEnd = Math.max(line.xStart + 0.08, pos.x)
+      restoreT(line.xStart, newEnd)
+      line.xEnd = newEnd
+    }
     else if (t === 'chord-x') {
       const item = line.items.find((it) => it.id === drag.value.itemId)
       if (!item) return
@@ -380,13 +395,13 @@ async function saveLines() {
   try {
     let res
     if (isTemp()) {
-      res = await fetch(`${API_BASE}/api/temp/${sheetId()}/chords/`, {
+      res = await fetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
       })
     } else {
-      res = await fetch(`${API_BASE}/api/songs/${props.sheet.id}/`, {
+      res = await fetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -418,7 +433,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
         force_new: forceNew,
       }
       if (mergeSongId) body.merge_song_id = mergeSongId
-      const res = await fetch(`${API_BASE}/api/songs/from-temp/`, {
+      const res = await fetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -433,7 +448,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
       emit('updated', { ...data, is_temp: false })
       message.value = '보정본 저장됨 (DB 등록)'
     } else {
-      const res = await fetch(`${API_BASE}/api/songs/${props.sheet.id}/`, {
+      const res = await fetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -463,7 +478,7 @@ async function confirmSheet() {
         chords: lines.value,
         force_new: true,
       }
-      let res = await fetch(`${API_BASE}/api/songs/from-temp/`, {
+      let res = await fetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -472,7 +487,7 @@ async function confirmSheet() {
       if (res.status === 409 && data.error === 'duplicate_title') {
         // 확정 흐름에서는 새 곡으로 강제 저장
         body.force_new = true
-        res = await fetch(`${API_BASE}/api/songs/from-temp/`, {
+        res = await fetch('/api/songs/from-temp/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -491,7 +506,7 @@ async function confirmSheet() {
     if (!songId) throw new Error('곡 ID가 없습니다')
 
     // 수정본 이미지 렌더 (Song API)
-    let res = await fetch(`${API_BASE}/api/songs/${songId}/render_variant/`, {
+    let res = await fetch(`/api/songs/${songId}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -519,13 +534,25 @@ async function confirmSheet() {
 
 
 const imageUrl = computed(() => {
-  const u = props.sheet.image_url || props.sheet.optimized_image
+  let u = props.sheet.optimized_image || props.sheet.image_url || ''
   if (!u) return ''
+  if (u.startsWith('/')) u = `${API_BASE}${u}`
+  if (u.includes('127.0.0.1') || u.includes('localhost')) {
+    u = u.replace('https://', 'http://')
+  } else if (u.startsWith('http://') && API_BASE.startsWith('https://')) {
+    u = u.replace('http://', 'https://')
+  }
   return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
 })
 const resultUrl = computed(() => {
-  const u = props.sheet.result_image
+  let u = props.sheet.result_image || ''
   if (!u) return ''
+  if (u.startsWith('/')) u = `${API_BASE}${u}`
+  if (u.includes('127.0.0.1') || u.includes('localhost')) {
+    u = u.replace('https://', 'http://')
+  } else if (u.startsWith('http://') && API_BASE.startsWith('https://')) {
+    u = u.replace('http://', 'https://')
+  }
   return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
 })
 </script>

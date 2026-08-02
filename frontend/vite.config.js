@@ -24,6 +24,10 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        '/media': {  // ← 이거 추가!
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
   }

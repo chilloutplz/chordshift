@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { API_BASE } from '@/api/api.js'
+import { apiFetch, API_BASE } from '@/api/api.js'
 
 const props = defineProps({ initialTitle: { type: String, default: '' } })
 const emit = defineEmits(['uploaded'])
@@ -33,12 +33,15 @@ async function upload() {
     if (title.value) form.append('title', title.value)
     form.append('run_ocr', 'true')
     // DB 생성 없이 임시 저장
-    const res = await fetch(`${API_BASE}/api/temp/upload/`, { method: 'POST', body: form })
+    const res = await apiFetch('/api/temp/upload/', { method: 'POST', body: form })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || `업로드 실패 (${res.status})`)
     }
     const data = await res.json()
+     // 상대경로면 절대주소로 바꿔주기
+    if (data.image_url?.startsWith('/')) data.image_url = `${API_BASE}${data.image_url}`
+    if (data.optimized_image?.startsWith('/')) data.optimized_image = `${API_BASE}${data.optimized_image}`
     emit('uploaded', data)
   } catch (e) {
     error.value = e.message || '업로드 중 오류'
