@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt && pip install gunicorn
 COPY . .
 
-RUN mkdir -p /app/static /app/staticfiles /app/media /app/media/tmp /app/.paddlex /app/.paddle && chmod -R 777 /app/media /app/staticfiles /app/.paddlex /app/.paddle /app
+RUN mkdir -p /app/static /app/staticfiles /app/media /app/media/tmp /app/.paddlex /app/.paddle
 
 ENV SECRET_KEY=dummy-build-key-for-collectstatic
 ENV DB_HOST=dummy
@@ -30,6 +30,9 @@ RUN python manage.py collectstatic --noinput || echo "collectstatic warning"
 
 # --- 모델 미리 다운로드 (빌드 타임에 캐시) ---
 RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='korean', use_textline_orientation=True)" || echo "paddle model cache failed, continue"
+
+# --- 권한은 캐시 후에 마지막에 풀기 (중요!) ---
+RUN chmod -R 777 /app/.paddlex /app/.paddle /app/media /app/staticfiles || true
 
 EXPOSE 8000
 CMD ["sh", "-c", "python -m gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 2 --timeout 180 --graceful-timeout 60 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile -"]
