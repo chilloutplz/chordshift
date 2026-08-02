@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { API_BASE } from '@/api/api.js'
 
 const props = defineProps({ initialTitle: { type: String, default: '' } })
 const emit = defineEmits(['uploaded'])
@@ -32,7 +33,7 @@ async function upload() {
     if (title.value) form.append('title', title.value)
     form.append('run_ocr', 'true')
     // DB 생성 없이 임시 저장
-    const res = await fetch('/api/temp/upload/', { method: 'POST', body: form })
+    const res = await fetch(`${API_BASE}/api/temp/upload/`, { method: 'POST', body: form })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || `업로드 실패 (${res.status})`)

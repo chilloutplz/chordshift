@@ -1,10 +1,8 @@
 """
-Django settings for config project.
+Django settings for config project - Cleaned for ChordShift
 """
-
 from pathlib import Path
 import os
-
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -12,10 +10,42 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-chordshift-dev-key-change-in-production')
-
 DEBUG = os.getenv('DEBUG', 'true').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '*').split(',') if h.strip()]
+# --- Helper ---
+def split_env(key, default=""):
+    return [h.strip() for h in os.getenv(key, default).split(",") if h.strip()]
+
+# --- Hosts & CORS (핵심) ---
+ALLOWED_HOSTS = split_env('ALLOWED_HOSTS', '*')
+
+# DEBUG일 때만 모든 Origin 허용, 아니면 지정된 것만 허용
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+
+CORS_ALLOWED_ORIGINS = split_env('CORS_ALLOWED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = split_env('CSRF_TRUSTED_ORIGINS', '')
+
+# 환경변수가 비어있을 때 (로컬 개발 편의용) 기본값 추가
+if not CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    # Cloudtype 프론트도 기본으로 포함 (운영에서 env로 덮어씀)
+    if not DEBUG:
+        CORS_ALLOWED_ORIGINS.append("https://web-frontend-ms9q4iuj754ec266.sel3.cloudtype.app")
+
+if not CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS = [
+        "http://localhost:5173",
+        "https://web-frontend-ms9q4iuj754ec266.sel3.cloudtype.app",
+        "https://port-0-backend-ms9q4iuj754ec266.sel3.cloudtype.app",
+    ]
+
+CORS_ALLOW_CREDENTIALS = True
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -24,17 +54,15 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'rest_framework',
     'corsheaders',
+    'rest_framework',
     'scores',
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware', # 무조건 최상단
     'django.middleware.security.SecurityMiddleware',
-    
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -63,7 +91,6 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # --- Database (PostgreSQL only) ---
-# .env: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 _db_host = os.getenv('DB_HOST', '').strip()
 _db_user = os.getenv('DB_USER', '').strip()
 _db_password = os.getenv('DB_PASSWORD', '')
@@ -153,8 +180,6 @@ else:
     }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
-CORS_ALLOW_ALL_ORIGINS = True
 
 REST_FRAMEWORK = {
     'DEFAULT_PARSER_CLASSES': [

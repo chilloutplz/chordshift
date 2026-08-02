@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { API_BASE } from '@/api/api.js'
 
 const props = defineProps({ sheet: { type: Object, required: true } })
 const emit = defineEmits(['updated', 'back', 'edit'])
@@ -120,7 +121,7 @@ async function renderAndSave() {
     const id = props.sheet.id
     if (!id) throw new Error('곡 ID 없음')
 
-    let res = await fetch(`/api/songs/${id}/render_variant/`, {
+    let res = await fetch(`${API_BASE}/api/songs/${id}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

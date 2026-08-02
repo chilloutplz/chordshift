@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import path from 'path'
 
 export default defineConfig(({ mode }) => {
   // 현재 mode(development, production 등)에 맞는 .env 파일을 로드합니다.
@@ -11,6 +12,11 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [vue()],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'), // <- 이게 핵심
+      },
+    },
     server: {
       port: 5173,
       proxy: {
