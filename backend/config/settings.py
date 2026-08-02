@@ -49,7 +49,7 @@ CORS_ALLOW_CREDENTIALS = True
 
 # --- CloudType https proxy fix (Mixed Content 해결 핵심) ---
 USE_X_FORWARDED_HOST = True
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 INSTALLED_APPS = [
@@ -102,10 +102,22 @@ _db_password = os.getenv('DB_PASSWORD', '')
 _db_name = os.getenv('DB_NAME', '').strip() or 'chordshift'
 _db_port = os.getenv('DB_PORT', '').strip() or '5432'
 
-if not _db_host or not _db_user:
-    raise ImproperlyConfigured(
-        'PostgreSQL 설정이 필요합니다. .env 에 DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT 를 넣으세요.'
-    )
+# 빌드타임(Dockerfile에서 dummy 주입)에는 DB 없어도 collectstatic이 돌아가게 허용
+# 런타임에는 CloudType 환경변수로 실제 값이 들어옴
+if (not _db_host or not _db_user) and _db_host != 'dummy':
+    # 빌드가 아닐 때만 에러, dummy면 빌드용으로 통과
+    if _db_host not in ('', 'dummy'):
+        raise ImproperlyConfigured(
+            'PostgreSQL 설정이 필요합니다. .env 에 DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT 를 넣으세요.'
+        )
+
+# dummy 빌드일 때는 강제 기본값으로 덮어써서 collectstatic 통과
+if _db_host == 'dummy':
+    _db_host = 'localhost'
+    _db_user = 'dummy'
+    _db_password = 'dummy'
+    _db_name = 'dummy'
+    _db_port = '5432'
 
 DATABASES = {
     'default': {
