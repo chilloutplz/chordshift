@@ -47,6 +47,11 @@ if not CSRF_TRUSTED_ORIGINS:
 
 CORS_ALLOW_CREDENTIALS = True
 
+# --- CloudType https proxy fix (Mixed Content 해결 핵심) ---
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

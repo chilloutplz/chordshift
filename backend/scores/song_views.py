@@ -44,17 +44,16 @@ def temp_upload(request):
     meta['ocr_raw_text'] = ocr_raw
     save_meta(info['temp_id'], meta)
 
-    raw_url = info['url']
-    abs_url = request.build_absolute_uri(raw_url)
-    # Cloudtype 프록시 때문에 http로 오는거 https로 강제
+    # build_absolute_uri가 http로 만들어도 https로 강제 (Mixed Content 방지)
+    abs_url = request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url']
     if abs_url.startswith('http://'):
-        abs_url = abs_url.replace('http://', 'https://', 1)
-    
+        abs_url = abs_url.replace('http://', 'https://')
+
     return Response({
         'temp_id': info['temp_id'],
         'title': meta['title'],
         'image_url': abs_url,
-        'optimized_image': abs_url,
+        'optimized_image': info['url'],  # 프론트 호환
         'chords': chords,
         'ocr_raw_text': ocr_raw,
         'transpose_semitones': 0,
