@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libglx-mesa0 \
+    libgomp1 libgcc-s1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,8 +15,8 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt && pip install gunicorn
 COPY . .
 
-# media + paddlex + static 권한 전부 해결
-RUN mkdir -p /app/static /app/staticfiles /app/media /app/media/tmp /app/.paddlex /app/.paddle /app/.paddlex/paddle && chmod -R 777 /app/media /app/staticfiles /app/.paddlex /app/.paddle
+# 권한 해결
+RUN mkdir -p /app/static /app/staticfiles /app/media /app/media/tmp /app/.paddlex /app/.paddle && chmod -R 777 /app/media /app/staticfiles /app/.paddlex /app/.paddle /app
 
 ENV SECRET_KEY=dummy-build-key-for-collectstatic
 ENV DB_HOST=dummy
