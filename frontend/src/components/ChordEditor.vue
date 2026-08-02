@@ -519,7 +519,7 @@ async function confirmSheet() {
 
 
 const imageUrl = computed(() => {
-  const u = props.sheet.optimized_image
+  const u = props.sheet.image_url || props.sheet.optimized_image
   if (!u) return ''
   return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
 })

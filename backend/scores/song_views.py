@@ -48,7 +48,7 @@ def temp_upload(request):
         'temp_id': info['temp_id'],
         'title': meta['title'],
         'image_url': request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url'],
-        'optimized_image': info['url'],  # 프론트 호환
+        'optimized_image': request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url'],
         'chords': chords,
         'ocr_raw_text': ocr_raw,
         'transpose_semitones': 0,
