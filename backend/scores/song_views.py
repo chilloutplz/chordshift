@@ -37,25 +37,28 @@ def temp_upload(request):
             from .utils.ocr import run_ocr as do_ocr
             result = do_ocr(info['path'])
             chords = result.get('chords') or result.get('chord_lines') or []
-            ocr_raw = result.get('raw_text', '')
+            # FIX: rapidocr는 ocr_raw_text, txts, raw_text 등 여러 키로 올 수 있음
+            ocr_raw = result.get('ocr_raw_text') or result.get('raw_text') or "\n".join(result.get('txts', [])) or ''
         except Exception as e:
             ocr_raw = f'[OCR error] {e}'
     meta['chords'] = chords
     meta['ocr_raw_text'] = ocr_raw
     save_meta(info['temp_id'], meta)
 
-    # build_absolute_uri가 http로 만들어도 https로 강제 (Mixed Content 방지)
-    abs_url = request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url']
-    if abs_url.startswith('http://'):
-        abs_url = abs_url.replace('http://', 'https://')
+    _abs = request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url']
+    if _abs.startswith('http://'):
+        _abs = _abs.replace('http://', 'https://')
+    _image_url = _abs
 
     return Response({
         'temp_id': info['temp_id'],
         'title': meta['title'],
-        'image_url': abs_url,
-        'optimized_image': info['url'],  # 프론트 호환
+        'image_url': _image_url,
+        'optimized_image': info['url'],
         'chords': chords,
         'ocr_raw_text': ocr_raw,
+        'txts': result.get('txts', []) if 'result' in locals() else [],
+        'lines': result.get('lines', []) if 'result' in locals() else [],
         'transpose_semitones': 0,
         'is_temp': True,
     }, status=201)
@@ -73,12 +76,14 @@ def temp_ocr(request, temp_id):
         return Response({'error': f'OCR 실패: {e}'}, status=500)
     meta = load_meta(temp_id) or {'temp_id': temp_id}
     meta['chords'] = result.get('chords') or []
-    meta['ocr_raw_text'] = result.get('raw_text', '')
+    meta['ocr_raw_text'] = result.get('ocr_raw_text') or result.get('raw_text') or "\n".join(result.get('txts', [])) or ''
     save_meta(temp_id, meta)
     return Response({
         'temp_id': temp_id,
         'chords': meta['chords'],
         'ocr_raw_text': meta['ocr_raw_text'],
+        'txts': result.get('txts', []),
+        'lines': result.get('lines', []),
         'is_temp': True,
     })
 
@@ -104,11 +109,6 @@ def temp_delete(request, temp_id):
 
 @api_view(['POST'])
 def song_from_temp(request):
-    """
-    보정본 저장 → 이때 비로소 Song DB 생성.
-    body: { temp_id, title, chords, merge_song_id? }
-    같은 제목이 있으면 409 + candidates (merge_song_id 로 기존 곡에 병합 가능)
-    """
     temp_id = request.data.get('temp_id')
     title = (request.data.get('title') or '').strip()
     chords = request.data.get('chords')
@@ -125,7 +125,6 @@ def song_from_temp(request):
     if not title and meta:
         title = meta.get('title') or ''
 
-    # 중복 제목 검사
     if title and not merge_id and not force_new:
         existing = list(Song.objects.filter(title__iexact=title)[:10])
         if existing:
@@ -144,7 +143,6 @@ def song_from_temp(request):
         song.chords = chords or song.chords
         if meta:
             song.ocr_raw_text = meta.get('ocr_raw_text') or song.ocr_raw_text
-        # 원본 이미지는 유지하거나 교체
         with open(path, 'rb') as fh:
             song.original_image.save(path.name, File(fh), save=True)
         song.save()
@@ -180,7 +178,6 @@ class SongViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def render_variant(self, request, id=None):
-        """현재 chords + semitones 로 변형 이미지 생성·저장"""
         song = self.get_object()
         if not song.original_image:
             return Response({'error': '원본 이미지 없음'}, status=400)
@@ -227,11 +224,6 @@ class SongViewSet(viewsets.ModelViewSet):
                 first = src[0]
             elif src and isinstance(src[0], dict):
                 first = src[0].get('chord') or 'C'
-            # render_chords already transposed when semitones applied above
-            root_src = first if semitones else first
-            if semitones and render_chords is not chords:
-                pass  # already transposed in render_chords
-            # extract root from whatever is in first of render_chords
             if render_chords and isinstance(render_chords[0], dict) and render_chords[0].get('items'):
                 shown = (render_chords[0]['items'][0] or {}).get('chord') or first
             else:
@@ -241,14 +233,12 @@ class SongViewSet(viewsets.ModelViewSet):
             root = (m.group(1)[0].upper() + m.group(1)[1:]) if m else 'C'
             label = f'{root}코드'
 
-        # 같은 song + semitones 는 한 레코드, 이미지는 고정 키로 덮어쓰기
         variant, _ = ScoreVariant.objects.get_or_create(
             song=song, transpose_semitones=semitones,
             defaults={'kind': kind, 'label': label},
         )
         variant.kind = kind
         variant.label = label
-        # 예: songs/variants/<song_id>_t0.jpg  (보정본), _t2.jpg (조옮김)
         filename = f'{song.id}_t{semitones}.jpg'
         if variant.image and variant.image.name:
             try:
@@ -257,7 +247,6 @@ class SongViewSet(viewsets.ModelViewSet):
                 pass
         variant.image.save(filename, content, save=True)
         song.save(update_fields=['updated_at'])
-        # relation cache 갱신 후 직렬화
         song = Song.objects.prefetch_related('variants').get(pk=song.pk)
         variant.refresh_from_db()
         return Response({
@@ -268,7 +257,6 @@ class SongViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         import os
         song = self.get_object()
-        # variants 이미지
         for v in song.variants.all():
             if v.image and v.image.name:
                 try:

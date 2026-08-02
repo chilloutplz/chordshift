@@ -24,3 +24,5 @@ Thumbs.db
 # Paddle / local models (있으면)
 .paddlex/
 backend/download.env
+backend/scores/utils/ocr_paddleocr.py
+backend/Dockerfile_Paddleocr

@@ -290,10 +290,9 @@ def group_hits_into_lines(hits: list) -> list:
                 'chord': c['chord'],
                 't': round(t, 5),
             })
-        OY = -0.016
         lines_out.append({
             'id': 'L' + uuid.uuid4().hex[:6],
-            'y': round(min(0.98, max(0.02, y + OY)), 5),
+            'y': round(min(0.98, max(0.02, y)), 5),
             'xStart': x_start,
             'xEnd': x_end,
             'height': 0.028,

@@ -89,8 +89,10 @@ function ensureItemT(items) {
   })
 }
 
+
 function toLines(raw) {
   if (!Array.isArray(raw) || !raw.length) return []
+  // 이미 lines 형식이면 그대로 (chord/text 호환)
   if (raw[0] && typeof raw[0] === 'object' && Array.isArray(raw[0].items)) {
     return raw.map((L, i) => ({
       id: L.id || `L${i}`,
@@ -99,24 +101,72 @@ function toLines(raw) {
       xEnd: L.xEnd ?? 0.99,
       height: L.height ?? 0.032,
       items: ensureItemT(
-        (L.items || []).map((it, j) =>
-          typeof it === 'string'
-            ? { id: `i${i}_${j}`, chord: it }
-            : { id: it.id || `i${i}_${j}`, chord: it.chord || '', t: it.t }
-        )
+        (L.items || []).map((it, j) => ({
+          id: it.id || `i${i}_${j}`,
+          chord: it.chord || it.text || '',
+          t: it.t ?? 0.5
+        }))
       ),
     }))
   }
-  const items = raw.map((c, j) =>
-    typeof c === 'string'
-      ? { id: `f${j}`, chord: c }
-      : { id: c.id || `f${j}`, chord: c.chord || '', t: c.t }
-  )
-  return [{
-    id: 'L0', y: 0.12, xStart: 0.01, xEnd: 0.99, height: 0.032,
-    items: ensureItemT(items),
-  }]
+
+  // === 절대좌표 모드 ===
+  // raw = [{chord/text, x, y}] 형태
+  // x,y가 픽셀 좌표면 그대로 %로 변환해서 한 줄씩 쪼개지 않고 y로만 그룹핑
+  // 저장된 y가 있으면 절대 덮어쓰지 않음 - 사용자 드래그 위치 유지
+  const W = 750 // 악보 이미지 예상 폭
+  const H = 1100 // 예상 높이
+
+  // 엣지 노이즈 제거: 왼쪽 5% 오른쪽 5% 밖은 버림
+  const filtered = raw.filter(c => {
+    if (typeof c === 'string') return true
+    const x = c.x ?? 0
+    if (x < 35 || x > 700) return false
+    const name = c.chord || c.text || ''
+    if (!name) return false
+    return true
+  })
+
+  const sorted = [...filtered].sort((a,b) => (a.y ?? 0) - (b.y ?? 0))
+
+  const groups = []
+  let cur = []
+  let lastY = null
+  const Y_GAP = 45
+
+  for (const c of sorted) {
+    const y = c.y ?? 0
+    const x = c.x ?? 0
+    const name = typeof c === 'string' ? c : (c.chord || c.text || '')
+    if (lastY === null || Math.abs(y - lastY) <= Y_GAP) {
+      cur.push({ id: c.id || `c_${groups.length}_${cur.length}`, chord: name, x, y, t: x / W })
+      lastY = lastY === null ? y : (lastY*0.7 + y*0.3)
+    } else {
+      if (cur.length) groups.push(cur)
+      cur = [{ id: c.id || `c_${groups.length}_0`, chord: name, x, y, t: x / W }]
+      lastY = y
+    }
+  }
+  if (cur.length) groups.push(cur)
+
+  return groups.map((g, gi) => {
+    g.sort((a,b) => a.x - b.x)
+    const avgY = g.reduce((s,it)=>s+it.y,0)/g.length
+    return {
+      id: `L${gi}`,
+      y: Math.min(0.92, Math.max(0.04, avgY / H )),
+      xStart: 0.01,
+      xEnd: 0.99,
+      height: 0.032,
+      items: ensureItemT(g.map(it => ({
+        id: it.id,
+        chord: it.chord,
+        t: Math.min(0.98, Math.max(0.02, it.t))
+      })))
+    }
+  })
 }
+
 
 watch(() => props.sheet, (s) => {
   lines.value = toLines(s.chords)
@@ -143,7 +193,7 @@ const paletteChords = computed(() => {
 function lineStyle(line) {
   const h = Math.max(line.height || 0.02, 0.015)
   return {
-    top: `${((line.y || 0) - h / 2) * 100}%`,
+    top: `${((line.y || 0) - h - 0.04) * 100}%`,  // 코드 한 개 높이만큼 위로,
     left: `${(line.xStart || 0) * 100}%`,
     width: `${((line.xEnd || 0.9) - (line.xStart || 0)) * 100}%`,
     height: `${h * 100}%`,
@@ -184,6 +234,7 @@ function startDrag(e, type, lineId, itemId = null) {
     startX: pos0?.x ?? 0,
     startY: pos0?.y ?? 0,
     origY: line0?.y ?? 0,
+    origHeight: line0?.height ?? 0.032,
     origXStart: line0?.xStart ?? 0.01,
     origXEnd: line0?.xEnd ?? 0.99,
     origAbs: null,
@@ -221,15 +272,15 @@ function startDrag(e, type, lineId, itemId = null) {
       // x는 고정 - 코드 절대위치 보존 (이동시키고 싶으면 아래 2줄 주석 해제)
       // const dx = pos.x - drag.value.startX ...
     } else if (t === 'line-h-top') {
-      const bottom = line.y + (line.height || 0.032) / 2
-      const top = Math.min(bottom - 0.012, pos.y)
-      line.height = Math.max(0.012, bottom - top)
-      line.y = (top + bottom) / 2
+      const fixedBottom = drag.value.origY - 0.04
+      const newTop = pos.y
+      line.height = Math.max(0.012, fixedBottom - newTop)
     } else if (t === 'line-h-bottom') {
-      const top = line.y - (line.height || 0.032) / 2
-      const bottom = Math.max(top + 0.012, pos.y)
-      line.height = Math.max(0.012, bottom - top)
-      line.y = (top + bottom) / 2
+      const origH = drag.value.origHeight || line.height || 0.032
+      const fixedTop = drag.value.origY - origH - 0.04
+      const newBottom = pos.y
+      line.height = Math.max(0.012, newBottom - fixedTop)
+      line.y = newBottom + 0.04  // ← y가 bottom 따라 내려가야 top이 안 움직임!
     } else if (t === 'line-left') {
       const newStart = Math.min(line.xEnd - 0.08, pos.x)
       restoreT(newStart, line.xEnd)
