@@ -26,3 +26,4 @@ Thumbs.db
 backend/download.env
 backend/scores/utils/ocr_paddleocr.py
 backend/Dockerfile_Paddleocr
+backend/scores/utils/ocr_paddle_recent.py

@@ -1,389 +1,135 @@
 """
-PaddleOCR → 줄(line) 단위 코드 그룹
-같은 높이(y)의 코드를 한 줄로 묶음
-PDX already initialized 에러 대응 패치
+RapidOCR → 줄(line) 단위 코드 그룹 - Cloudtype 최종
 """
-import os
 import re
 import uuid
-import threading
 from functools import lru_cache
 
-# 반드시 paddle import 전에 설정
-os.environ.setdefault('FLAGS_enable_pir_api', '0')
-os.environ.setdefault('FLAGS_use_mkldnn', '0')
-os.environ.setdefault('PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT', '0')
-os.environ.setdefault('DISABLE_MODEL_SOURCE_CHECK', 'True')
-
 CHORD_FULL = re.compile(
-    r'^('
-    r'[A-G](?:#|b)?'
-    r'(?:maj|min|m|dim|aug|sus|add|M|°)?'
-    r'(?:\d{1,2})?'
-    r'(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9|add11)?'
-    r'(?:/[A-G](?:#|b)?)?'
-    r')$',
+    r'^([A-G](?:#|b)?(?:maj|min|m|dim|aug|sus|add|M|°)?(?:\d{1,2})?(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9|add11)?(?:/[A-G](?:#|b)?)?)$',
     re.IGNORECASE,
 )
 CHORD_IN_TEXT = re.compile(
-    r'\b('
-    r'[A-G](?:#|b)?'
-    r'(?:maj|min|m|dim|aug|sus|add|M)?'
-    r'(?:\d{0,2})?'
-    r'(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9)?'
-    r'(?:/[A-G](?:#|b)?)?'
-    r')\b',
+    r'\b([A-G](?:#|b)?(?:maj|min|m|dim|aug|sus|add|M)?(?:\d{0,2})?(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9)?(?:/[A-G](?:#|b)?)?)\b',
     re.IGNORECASE,
 )
 
-LINE_Y_THRESHOLD = 0.025
-
-_lock = threading.Lock()
-
-def _is_empty(obj) -> bool:
-    if obj is None:
-        return True
-    try:
-        import numpy as np
-        if isinstance(obj, np.ndarray):
-            return obj.size == 0
-    except Exception:
-        pass
-    if isinstance(obj, (list, tuple, set, dict, str)):
-        return len(obj) == 0
-    return False
-
+LINE_Y_THRESHOLD = 0.025  # 같은 줄 판단 y 차이
 
 def _to_list(obj):
-    if obj is None:
-        return []
-    try:
-        import numpy as np
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-    except Exception:
-        pass
-    if isinstance(obj, list):
-        return obj
-    if isinstance(obj, tuple):
-        return list(obj)
-    if hasattr(obj, 'tolist'):
-        try:
-            return obj.tolist()
-        except Exception:
-            pass
-    try:
-        return list(obj)
-    except Exception:
-        return []
-
-
-@lru_cache(maxsize=1)
-def get_ocr_engine():
-    """
-    PDX already initialized 대응:
-    - enable_mkldnn 같은 구 파라미터 제거
-    - threading.Lock으로 동시 생성 방지
-    - 실패해도 lru_cache에 예외가 남지 않도록 내부에서 처리
-    """
-    from paddleocr import PaddleOCR
-    with _lock:
-        # 가장 호환성 높은 최소 옵션
-        return PaddleOCR(
-            lang='en',
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-        )
-
+    if obj is None: return []
+    if isinstance(obj, list): return obj
+    try: return obj.tolist()
+    except: return list(obj) if isinstance(obj, (tuple, set)) else []
 
 def _box_to_norm(box, img_w, img_h):
-    if _is_empty(box) or not img_w or not img_h:
-        return None
+    if not box or not img_w or not img_h: return None
     try:
         pts = _to_list(box)
-        if not pts:
-            return None
         xs, ys = [], []
-        if isinstance(pts[0], (list, tuple)):
-            for pt in pts:
-                if pt is None or len(pt) < 2:
-                    continue
-                xs.append(float(pt[0]))
-                ys.append(float(pt[1]))
+        if pts and isinstance(pts[0], (list, tuple)):
+            for pt in pts: xs.append(float(pt[0])); ys.append(float(pt[1]))
         else:
-            coords = [float(v) for v in pts]
-            if len(coords) < 4:
-                return None
-            xs, ys = coords[0::2], coords[1::2]
-        if not xs or not ys:
-            return None
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
+            coords = [float(v) for v in pts]; xs, ys = coords[0::2], coords[1::2]
+        if not xs: return None
         return {
-            'x': round(min_x / img_w, 5),
-            'y': round(min_y / img_h, 5),
-            'w': round(max(max_x - min_x, 1) / img_w, 5),
-            'h': round(max(max_y - min_y, 1) / img_h, 5),
+            'x': round(min(xs)/img_w,5), 'y': round(min(ys)/img_h,5),
+            'w': round(max(max(xs)-min(xs),1)/img_w,5),
+            'h': round(max(max(ys)-min(ys),1)/img_h,5),
         }
-    except Exception:
-        return None
-
+    except: return None
 
 def _looks_like_chord(token: str) -> bool:
     token = (token or '').strip()
-    if not token or len(token) > 12:
-        return False
+    if not token or len(token)>12: return False
     return bool(CHORD_FULL.match(token))
 
-
-def _append_line(lines, texts, text, conf, box, img_w, img_h):
-    text = str(text).strip() if text is not None else ''
-    if not text:
-        return
-    try:
-        conf = float(conf)
-    except Exception:
-        conf = 0.0
-    norm = _box_to_norm(box, img_w, img_h)
-    lines.append({
-        'text': text,
-        'confidence': conf,
-        'box': _to_list(box) if not _is_empty(box) else None,
-        'norm': norm,
-    })
-    texts.append(text)
-
-
-def _extract_from_page(page, img_w, img_h, lines, texts):
-    if isinstance(page, dict):
-        rec_texts = _to_list(page.get('rec_texts') or page.get('texts'))
-        rec_scores = _to_list(page.get('rec_scores') or page.get('scores'))
-        boxes = _to_list(
-            page.get('rec_polys')
-            or page.get('dt_polys')
-            or page.get('rec_boxes')
-            or page.get('boxes')
-        )
-        for i, text in enumerate(rec_texts):
-            conf = rec_scores[i] if i < len(rec_scores) else 0.0
-            box = boxes[i] if i < len(boxes) else None
-            _append_line(lines, texts, text, conf, box, img_w, img_h)
-        return
-
-    for t_attr, s_attr, b_attr in [
-        ('rec_texts', 'rec_scores', 'rec_polys'),
-        ('rec_texts', 'rec_scores', 'dt_polys'),
-        ('rec_texts', 'rec_scores', 'rec_boxes'),
-        ('texts', 'scores', 'boxes'),
-    ]:
-        if not hasattr(page, t_attr):
-            continue
-        rec_texts = _to_list(getattr(page, t_attr, None))
-        if not rec_texts:
-            continue
-        rec_scores = _to_list(getattr(page, s_attr, None))
-        boxes = _to_list(getattr(page, b_attr, None))
-        for i, text in enumerate(rec_texts):
-            conf = rec_scores[i] if i < len(rec_scores) else 0.0
-            box = boxes[i] if i < len(boxes) else None
-            _append_line(lines, texts, text, conf, box, img_w, img_h)
-        return
-
-    if isinstance(page, (list, tuple)):
-        for line in page:
-            try:
-                if not isinstance(line, (list, tuple)) or len(line) < 2:
-                    continue
-                box, rec = line[0], line[1]
-                if isinstance(rec, (list, tuple)) and len(rec) >= 2:
-                    _append_line(lines, texts, rec[0], rec[1], box, img_w, img_h)
-                elif isinstance(rec, dict):
-                    _append_line(
-                        lines, texts,
-                        rec.get('text') or rec.get('transcription'),
-                        rec.get('score') or rec.get('confidence') or 0,
-                        box, img_w, img_h,
-                    )
-            except Exception:
-                continue
-
-
-def _parse_ocr_result(result, img_w=None, img_h=None):
-    lines, texts = [], []
-    if result is None:
-        return lines, ''
-    items = result
-    if hasattr(result, '__iter__') and not isinstance(result, (list, tuple, dict, str)):
-        try:
-            items = list(result)
-        except Exception:
-            items = [result]
-    if not isinstance(items, list):
-        items = [items]
-    for page in items:
-        _extract_from_page(page, img_w, img_h, lines, texts)
-    return lines, '\n'.join(texts)
-
+@lru_cache(maxsize=1)
+def get_ocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR(lang='korean_english', det_limit_side_len=1280)
 
 def _flat_chord_hits(ocr_lines: list) -> list:
-    hits = []
+    hits=[]
     for line in ocr_lines:
-        text = (line.get('text') or '').strip()
-        norm = line.get('norm')
-        conf = line.get('confidence', 0)
-        y = (norm or {}).get('y', 0.1)
-        x = (norm or {}).get('x', 0.05)
-
+        text=(line.get('text') or '').strip()
+        norm=line.get('norm'); conf=line.get('confidence',0)
+        y=(norm or {}).get('y',0.1); x=(norm or {}).get('x',0.05)
         if _looks_like_chord(text):
-            hits.append({'chord': text, 'x': x, 'y': y, 'confidence': conf})
-            continue
+            hits.append({'chord':text,'x':x,'y':y,'confidence':conf}); continue
         for m in CHORD_IN_TEXT.finditer(text):
-            token = m.group(1)
-            if not _looks_like_chord(token):
-                continue
+            token=m.group(1)
+            if not _looks_like_chord(token): continue
             if norm:
-                ratio = m.start() / max(len(text), 1)
-                cx = round(norm['x'] + norm['w'] * ratio, 5)
-                cy = norm['y']
-            else:
-                cx, cy = 0.05, 0.1
-            hits.append({'chord': token, 'x': cx, 'y': cy, 'confidence': conf})
+                ratio=m.start()/max(len(text),1)
+                cx=round(norm['x']+norm['w']*ratio,5); cy=norm['y']
+            else: cx,cy=0.05,0.1
+            hits.append({'chord':token,'x':cx,'y':cy,'confidence':conf})
     return hits
 
-
 def group_hits_into_lines(hits: list) -> list:
-    if not hits:
-        return []
-
-    sorted_hits = sorted(hits, key=lambda h: (h.get('y', 0), h.get('x', 0)))
-    clusters = []
-
+    if not hits: return []
+    sorted_hits=sorted(hits, key=lambda h:(h.get('y',0),h.get('x',0)))
+    clusters=[]
     for h in sorted_hits:
-        placed = False
-        for cluster in clusters:
-            avg_y = sum(c['y'] for c in cluster) / len(cluster)
-            if abs(h['y'] - avg_y) <= LINE_Y_THRESHOLD:
-                cluster.append(h)
-                placed = True
-                break
-        if not placed:
-            clusters.append([h])
-
-    lines_out = []
-    for cluster in clusters:
-        cluster.sort(key=lambda c: c.get('x', 0))
-        ys = [c['y'] for c in cluster]
-        y = sum(ys) / len(ys)
-        # 코드줄은 이미지 전체 너비로 고정
-        x_start = 0.01
-        x_end = 0.99
-        items = []
-        for c in cluster:
-            # 읽은 위치 + 두글자 오른쪽 보정
-            abs_x = max(0.02, min(0.96, c['x']))  # 오른쪽 여유 확보
-            abs_x = min(0.96, abs_x + 0.022)  # 두글자 크기만큼 오른쪽 (0.022 ≈ 2글자)
-            t = (abs_x - 0.01) / 0.98
-            t = max(0.02, min(0.98, t))
-            items.append({
-                'id': uuid.uuid4().hex[:8],
-                'chord': c['chord'],
-                't': round(t, 5),
-            })
-        lines_out.append({
-            'id': 'L' + uuid.uuid4().hex[:6],
-            'y': round(min(0.98, max(0.02, y)), 5),
-            'xStart': x_start,
-            'xEnd': x_end,
-            'height': 0.028,
-            'items': items,
-        })
-
-    lines_out.sort(key=lambda L: L['y'])
+        placed=False
+        for cl in clusters:
+            avg_y=sum(c['y'] for c in cl)/len(cl)
+            if abs(h['y']-avg_y)<=LINE_Y_THRESHOLD: cl.append(h); placed=True; break
+        if not placed: clusters.append([h])
+    lines_out=[]
+    for cl in clusters:
+        cl.sort(key=lambda c:c.get('x',0))
+        y=sum(c['y'] for c in cl)/len(cl)
+        items=[{'id':uuid.uuid4().hex[:8],'chord':c['chord'],'t':round(max(0.02,min(0.98,c['x'])),5),'x_abs':round(c['x'],5)} for c in cl]
+        lines_out.append({'id':'L'+uuid.uuid4().hex[:6],'y':round(min(0.98,max(0.02,y)),5),'xStart':0.01,'xEnd':0.99,'height':0.028,'items':items})
+    lines_out.sort(key=lambda L:L['y'])
     return lines_out
-
 
 def run_ocr(image_path: str) -> dict:
     from PIL import Image
-
-    img_w = img_h = None
+    img_w=img_h=None
     try:
-        with Image.open(image_path) as im:
-            img_w, img_h = im.size
-    except Exception:
-        pass
+        with Image.open(image_path) as im: img_w,img_h=im.size
+    except: pass
 
-    # PDX already initialized 에러가 나도 기존 엔진 재사용 시도
-    try:
-        ocr = get_ocr_engine()
-    except Exception as e:
-        msg = str(e)
-        if 'already been initialized' in msg or 'PDX' in msg:
-            # 캐시 비우고 재시도 - 이미 초기화된 전역 객체를 쓰게 될 수도 있음
-            get_ocr_engine.cache_clear()
-            try:
-                ocr = get_ocr_engine()
-            except Exception as e2:
-                # 최후: 빈 결과 반환으로 업로드는 성공시키기
-                return {
-                    'raw_text': f'[OCR error] {e2}',
-                    'lines': [],
-                    'chord_lines': [],
-                    'chords': [],
-                    'chord_candidates': [],
-                    'image_size': {'width': img_w, 'height': img_h},
-                }
+    ocr=get_ocr_engine()
+    # RapidOCR API: (result, elapse)  where result = [[box,text,score],...]
+    raw_result=ocr(str(image_path))
+    result_list = raw_result[0] if isinstance(raw_result, tuple) else raw_result
+
+    ocr_lines=[]; raw_texts=[]
+    if result_list:
+        # 구버전 object(txts/boxes) 대응도 포함
+        if hasattr(result_list,'txts'):
+            txts=_to_list(result_list.txts); boxes=_to_list(getattr(result_list,'boxes',[]))
+            for i,txt in enumerate(txts):
+                box=boxes[i] if i < len(boxes) else None
+                txt=str(txt).strip()
+                if not txt: continue
+                norm=_box_to_norm(box,img_w,img_h)
+                ocr_lines.append({'text':txt,'confidence':0.9,'box':box,'norm':norm}); raw_texts.append(txt)
         else:
-            raise
+            for item in result_list:
+                if not item or len(item)<2: continue
+                box, text = item[0], item[1]
+                score = item[2] if len(item)>2 else 0.9
+                text=str(text).strip()
+                if not text: continue
+                norm=_box_to_norm(box,img_w,img_h)
+                ocr_lines.append({'text':text,'confidence':float(score) if isinstance(score,(int,float)) else 0.9,'box':box,'norm':norm})
+                raw_texts.append(text)
 
-    result = None
-    last_err = None
-    for method in ('predict', 'ocr'):
-        try:
-            result = getattr(ocr, method)(image_path)
-            break
-        except Exception as e:
-            # PDX 에러가 여기서 날 수도 있음
-            if 'already been initialized' in str(e):
-                # 이미 초기화된 경우, 캐시된 엔진이 실제로는 살아있을 수 있으니 다시 predict
-                try:
-                    result = ocr.predict(image_path)
-                    break
-                except Exception:
-                    pass
-            last_err = e
-            result = None
-
-    if result is None and last_err is not None:
-        raise RuntimeError(f'OCR engine failed: {last_err}') from last_err
-
-    ocr_lines, raw_text = _parse_ocr_result(result, img_w, img_h)
-    hits = _flat_chord_hits(ocr_lines)
-    lines = group_hits_into_lines(hits)
-
-    flat = []
-    for L in lines:
-        n = max(len(L['items']), 1)
-        for i, it in enumerate(L['items']):
-            t = L['xStart'] + (L['xEnd'] - L['xStart']) * (i + 0.5) / n
-            flat.append({
-                'id': it['id'],
-                'chord': it['chord'],
-                'x': round(t, 5),
-                'y': L['y'],
-                'w': 0.04,
-                'h': 0.02,
-                'lineId': L['id'],
-            })
+    hits=_flat_chord_hits(ocr_lines)
+    lines=group_hits_into_lines(hits)
 
     return {
-        'raw_text': raw_text,
-        'lines': [
-            {'text': l.get('text'), 'confidence': l.get('confidence'), 'norm': l.get('norm')}
-            for l in ocr_lines
-        ],
-        'chord_lines': lines,
-        'chords': lines,
-        'chord_candidates': [it['chord'] for L in lines for it in L['items']],
-        'image_size': {'width': img_w, 'height': img_h},
+        'raw_text':'\n'.join(raw_texts),
+        'ocr_raw_text':'\n'.join(raw_texts),
+        'txts': raw_texts,
+        'lines':[{'text':l.get('text'),'confidence':l.get('confidence'),'norm':l.get('norm')} for l in ocr_lines],
+        'chord_lines':lines,
+        'chords':lines,
+        'chord_candidates':[it['chord'] for L in lines for it in L['items']],
+        'image_size':{'width':img_w,'height':img_h},
     }

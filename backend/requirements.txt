@@ -1,30 +1,12 @@
-# ChordShift backend
-# Python 3.10 ~ 3.12 권장 (PaddleOCR 공식: 3.8–3.12)
-
 Django>=5.0,<7
 djangorestframework>=3.14
 django-cors-headers>=4.0
 Pillow>=10.0
-
-# OCR — 버전 고정 (Python 3.12 호환 검증됨)
-# PaddleOCR 3.x 는 PaddlePaddle >= 3.0 필요
-# paddlepaddle==3.3.1
-# paddleocr==3.7.0
-
-# ONNX Runtime 기반 OCR (PaddleOCR보다 가볍고 빠름)
-rapidocr_onnxruntime==1.4.4
-onnxruntime==1.19.2
-# libGL.so.1 에러 해결: paddleocr이 끌어오는 opencv-python 대신 headless 강제
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
-
-# Cloudflare R2 (S3-compatible)
-django-storages[s3]>=1.14
+opencv-python-headless==4.9.0.80
+rapidocr_onnxruntime>=1.3.0
+django-storages>=1.14
 boto3>=1.34
 python-dotenv>=1.0
-
-# PostgreSQL
 psycopg[binary]>=3.1
-
-# whitenoise for static file serving
 whitenoise>=6.5
+gunicorn
