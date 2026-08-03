@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { API_BASE } from '@/api/api.js'
+import { apiFetch } from '../api/api'
 
 const emit = defineEmits(['open', 'go-upload'])
 
@@ -62,7 +62,7 @@ async function loadAll() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch(`${API_BASE}/api/songs/`)
+    const res = await apiFetch(`/api/songs/`)
     if (!res.ok) throw new Error('목록을 불러오지 못했습니다')
     const data = await res.json()
     allSongs.value = Array.isArray(data) ? data : (data.results || [])
@@ -84,7 +84,7 @@ async function search() {
       await loadAll()
       return
     }
-    const res = await fetch(`${API_BASE}/api/songs/search/?q=${encodeURIComponent(q)}`)
+    const res = await apiFetch(`/api/songs/search/?q=${encodeURIComponent(q)}`)
     if (!res.ok) throw new Error('검색 실패')
     const data = await res.json()
     allSongs.value = Array.isArray(data) ? data : (data.results || [])

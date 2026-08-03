@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { API_BASE } from '@/api/api.js'
+import { apiFetch } from '@/api/api.js'
 
 const props = defineProps({
   sheet: { type: Object, required: true },
@@ -446,13 +446,13 @@ async function saveLines() {
   try {
     let res
     if (isTemp()) {
-      res = await fetch(`/api/temp/${sheetId()}/chords/`, {
+      res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
       })
     } else {
-      res = await fetch(`/api/songs/${props.sheet.id}/`, {
+      res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -484,7 +484,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
         force_new: forceNew,
       }
       if (mergeSongId) body.merge_song_id = mergeSongId
-      const res = await fetch('/api/songs/from-temp/', {
+      const res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -499,7 +499,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
       emit('updated', { ...data, is_temp: false })
       message.value = '보정본 저장됨 (DB 등록)'
     } else {
-      const res = await fetch(`/api/songs/${props.sheet.id}/`, {
+      const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -529,7 +529,7 @@ async function confirmSheet() {
         chords: lines.value,
         force_new: true,
       }
-      let res = await fetch('/api/songs/from-temp/', {
+      let res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -538,7 +538,7 @@ async function confirmSheet() {
       if (res.status === 409 && data.error === 'duplicate_title') {
         // 확정 흐름에서는 새 곡으로 강제 저장
         body.force_new = true
-        res = await fetch('/api/songs/from-temp/', {
+        res = await apiFetch('/api/songs/from-temp/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -557,7 +557,7 @@ async function confirmSheet() {
     if (!songId) throw new Error('곡 ID가 없습니다')
 
     // 수정본 이미지 렌더 (Song API)
-    let res = await fetch(`/api/songs/${songId}/render_variant/`, {
+    let res = await apiFetch(`/api/songs/${songId}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
