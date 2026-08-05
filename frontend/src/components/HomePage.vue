@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { apiFetch } from '../api/api'
+import { apiFetch, API_BASE } from '../api/api'
 
 const emit = defineEmits(['open', 'go-upload'])
 
@@ -10,8 +10,12 @@ const query = ref('')
 const allSongs = ref([])
 const loading = ref(false)
 const error = ref('')
-const searched = ref(false) // 검색을 한 번이라도 실행했는지
+const searched = ref(false)
 const openFolder = ref(null)
+const uploading = ref(false)
+const uploadError = ref('')
+const fileInput = ref(null)
+const pendingTitle = ref('')
 
 function getCho(title) {
   const c = (title || '').trim().charAt(0)
@@ -47,9 +51,7 @@ const folders = computed(() => {
   return keys.map((key) => ({
     key,
     count: map.get(key).length,
-    songs: map.get(key).sort((a, b) =>
-      (a.title || '').localeCompare(b.title || '', 'ko')
-    ),
+    songs: map.get(key).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'ko')),
   }))
 })
 
@@ -100,6 +102,41 @@ function toggleFolder(key) {
   openFolder.value = openFolder.value === key ? null : key
 }
 
+// ★ 핵심: 업로드 중간 페이지 없이 바로 편집으로!
+function triggerUpload(titleHint = '') {
+  pendingTitle.value = titleHint || query.value.trim()
+  uploadError.value = ''
+  fileInput.value?.click()
+}
+
+async function onFileSelected(e) {
+  const f = e.target.files?.[0]
+  if (!f) return
+  uploading.value = true
+  uploadError.value = ''
+  try {
+    const form = new FormData()
+    form.append('image', f)
+    if (pendingTitle.value) form.append('title', pendingTitle.value)
+    form.append('run_ocr', 'false')
+    const res = await apiFetch('/api/temp/upload/', { method: 'POST', body: form })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `업로드 실패 (${res.status})`)
+    }
+    const data = await res.json()
+    if (data.image_url?.startsWith('/')) data.image_url = `${API_BASE}${data.image_url}`
+    if (data.optimized_image?.startsWith('/')) data.optimized_image = `${API_BASE}${data.optimized_image}`
+    // 바로 편집 화면으로!
+    emit('open', data)
+  } catch (err) {
+    uploadError.value = err.message || '업로드 중 오류'
+  } finally {
+    uploading.value = false
+    e.target.value = ''
+  }
+}
+
 onMounted(() => {
   searched.value = false
   loadAll()
@@ -111,32 +148,21 @@ onMounted(() => {
     <h2>곡 찾아보기</h2>
     <p class="lead">제목으로 검색하거나 폴더에서 고르세요.</p>
 
+    <input ref="fileInput" type="file" accept="image/*" style="display:none" @change="onFileSelected" />
+
     <form class="search-row" @submit.prevent="search">
-      <input
-        v-model="query"
-        type="search"
-        placeholder="곡 제목 검색"
-        autocomplete="off"
-      />
+      <input v-model="query" type="search" placeholder="곡 제목 검색" autocomplete="off" />
       <button type="submit" :disabled="loading">검색</button>
     </form>
 
-    <!-- 검색 후에만: 결과 없음 또는 원하는 곡이 없을 때 업로드 -->
     <div v-if="searched" class="after-search">
-      <p v-if="!loading && !allSongs.length" class="empty-msg">
-        「{{ query || '검색어' }}」에 해당하는 곡이 없습니다.
-      </p>
-      <p v-else-if="!loading && allSongs.length" class="hint-msg">
-        원하는 곡이 없나요? (제목은 같아도 다른 악보일 수 있어요)
-      </p>
-      <button
-        v-if="!loading"
-        type="button"
-        class="upload-link"
-        @click="emit('go-upload', query)"
-      >
+      <p v-if="!loading && !allSongs.length" class="empty-msg">「{{ query || '검색어' }}」에 해당하는 곡이 없습니다.</p>
+      <p v-else-if="!loading && allSongs.length" class="hint-msg">원하는 곡이 없나요? (제목은 같아도 다른 악보일 수 있어요)</p>
+      <button v-if="!loading && !uploading" type="button" class="upload-link" @click="triggerUpload(query)">
         + 새 악보 업로드
       </button>
+      <p v-if="uploading" class="uploading-msg">업로드 중… 바로 편집 화면으로 이동합니다.</p>
+      <p v-if="uploadError" class="error">{{ uploadError }}</p>
     </div>
 
     <p v-if="loading" class="muted">불러오는 중…</p>
@@ -144,11 +170,7 @@ onMounted(() => {
 
     <template v-else>
       <h3 class="sub">전체 폴더 ({{ allSongs.length }}곡)</h3>
-
-      <p v-if="!folders.length && !searched" class="muted">
-        저장된 곡이 없습니다. 검색 후 새 악보를 업로드할 수 있습니다.
-      </p>
-
+      <p v-if="!folders.length && !searched" class="muted">저장된 곡이 없습니다. 검색 후 새 악보를 업로드할 수 있습니다.</p>
       <ul v-else-if="folders.length" class="folder-list">
         <li v-for="f in folders" :key="f.key" class="folder">
           <button type="button" class="folder-head" @click="toggleFolder(f.key)">
@@ -160,9 +182,7 @@ onMounted(() => {
             <li v-for="s in f.songs" :key="s.id">
               <button type="button" class="song-item" @click="emit('open', s)">
                 <span class="title">{{ s.title || '제목 없음' }}</span>
-                <span class="meta" v-if="variantCount(s)">
-                  코드 {{ variantCount(s) }}
-                </span>
+                <span class="meta" v-if="variantCount(s)">코드 {{ variantCount(s) }}</span>
               </button>
             </li>
           </ul>
@@ -176,51 +196,22 @@ onMounted(() => {
 .home h2 { margin: 0 0 0.35rem; font-size: 1.25rem; }
 .lead { margin: 0 0 1rem; color: #666; font-size: 0.9rem; }
 .search-row { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
-.search-row input {
-  flex: 1; padding: 0.65rem 0.85rem; border: 1px solid #ccc;
-  border-radius: 8px; font-size: 1rem;
-}
-.search-row button {
-  padding: 0.65rem 1.1rem; border: none; border-radius: 8px;
-  background: #1a1a2e; color: #fff; cursor: pointer; font-weight: 600;
-}
-.after-search {
-  margin-bottom: 1.25rem;
-  padding: 0.85rem;
-  background: #f8faff;
-  border: 1px solid #d0e0ff;
-  border-radius: 10px;
-}
+.search-row input { flex: 1; padding: 0.65rem 0.85rem; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
+.search-row button { padding: 0.65rem 1.1rem; border: none; border-radius: 8px; background: #1a1a2e; color: #fff; cursor: pointer; font-weight: 600; }
+.after-search { margin-bottom: 1.25rem; padding: 0.85rem; background: #f8faff; border: 1px solid #d0e0ff; border-radius: 10px; }
 .empty-msg { margin: 0 0 0.6rem; color: #555; font-weight: 600; }
 .hint-msg { margin: 0 0 0.6rem; color: #666; font-size: 0.9rem; }
-.upload-link {
-  width: 100%; padding: 0.7rem;
-  border: 2px dashed #0d6efd; border-radius: 10px;
-  background: #fff; color: #0d6efd; font-weight: 700; cursor: pointer;
-}
+.upload-link { width: 100%; padding: 0.7rem; border: 2px dashed #0d6efd; border-radius: 10px; background: #fff; color: #0d6efd; font-weight: 700; cursor: pointer; }
+.uploading-msg { margin: 0.6rem 0 0; color: #0d6efd; font-weight: 700; text-align: center; }
 .sub { margin: 0 0 0.6rem; font-size: 0.95rem; color: #444; font-weight: 700; }
 .folder-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
-.folder-head {
-  width: 100%; display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.65rem 0.85rem; border: 1px solid #e5e5e5; border-radius: 8px;
-  background: #fafafa; cursor: pointer; text-align: left;
-}
+.folder-head { width: 100%; display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 0.85rem; border: 1px solid #e5e5e5; border-radius: 8px; background: #fafafa; cursor: pointer; text-align: left; }
 .folder-head:hover { border-color: #0d6efd; background: #f8faff; }
-.cho {
-  width: 1.8rem; height: 1.8rem; display: flex; align-items: center; justify-content: center;
-  background: #1a1a2e; color: #fff; border-radius: 6px; font-weight: 800; font-size: 0.95rem;
-}
+.cho { width: 1.8rem; height: 1.8rem; display: flex; align-items: center; justify-content: center; background: #1a1a2e; color: #fff; border-radius: 6px; font-weight: 800; font-size: 0.95rem; }
 .fname { flex: 1; font-weight: 600; color: #333; }
 .chev { color: #999; }
-.song-list {
-  list-style: none; padding: 0.35rem 0 0.35rem 1.5rem; margin: 0;
-  display: flex; flex-direction: column; gap: 0.3rem;
-}
-.song-item {
-  width: 100%; text-align: left; padding: 0.55rem 0.75rem;
-  border: 1px solid #eee; border-radius: 6px; background: #fff; cursor: pointer;
-  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
-}
+.song-list { list-style: none; padding: 0.35rem 0 0.35rem 1.5rem; margin: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.song-item { width: 100%; text-align: left; padding: 0.55rem 0.75rem; border: 1px solid #eee; border-radius: 6px; background: #fff; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
 .song-item:hover { border-color: #0d6efd; background: #f8faff; }
 .title { font-weight: 600; }
 .meta { font-size: 0.8rem; color: #888; }

@@ -3,6 +3,7 @@ import UploadScore from './UploadScore.vue'
 
 defineProps({
   initialTitle: { type: String, default: '' },
+  initialFile: { type: Object, default: null },
 })
 const emit = defineEmits(['uploaded', 'back'])
 </script>
@@ -10,7 +11,7 @@ const emit = defineEmits(['uploaded', 'back'])
 <template>
   <section class="upload-page">
     <button type="button" class="back" @click="emit('back')">← 검색으로</button>
-    <UploadScore :initial-title="initialTitle" @uploaded="emit('uploaded', $event)" />
+    <UploadScore :initial-title="initialTitle" :initial-file="initialFile" @uploaded="emit('uploaded', $event)" />
   </section>
 </template>
 

@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { apiFetch } from '@/api/api.js'
+import { API_BASE, apiFetch } from '@/api/api.js'
 
 const props = defineProps({
   sheet: { type: Object, required: true },
@@ -24,6 +24,8 @@ const semitones = ref(0)
 const saving = ref(false)
 const confirming = ref(false)
 const message = ref('')
+const ocrLoading = ref(false)
+const ocrError = ref('')
 const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
@@ -57,6 +59,60 @@ function sheetId() {
   return props.sheet.temp_id || props.sheet.id
 }
 
+async function runOcr() {
+  const temp_id = props.sheet.temp_id
+  if (!temp_id) {
+    ocrError.value = '임시 ID가 없습니다. 다시 업로드하세요.'
+    return
+  }
+  ocrLoading.value = true
+  ocrError.value = ''
+  try {
+    // 1차: /ocr/ 호출 (job 방식 또는 sync 방식 둘 다 대응)
+    let res = await apiFetch(`/api/temp/${temp_id}/ocr/`, { method: 'POST' })
+    // 만약 404면 sync 엔드포인트 시도
+    if (res.status === 404) {
+      res = await apiFetch(`/api/temp/${temp_id}/ocr-sync/`, { method: 'POST' })
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({}))
+      throw new Error(err.error || `OCR 실패 (${res.status})`)
+    }
+    let data = await res.json()
+
+    // job_id 방식이면 폴링
+    if (data.job_id) {
+      const jobId = data.job_id
+      for (let i=0; i<60; i++) {
+        await new Promise(r=>setTimeout(r, 1000))
+        const jr = await apiFetch(`/api/temp/job/${jobId}/`)
+        if (!jr.ok) continue
+        const jd = await jr.json()
+        if (jd.status === 'done' && jd.result) {
+          data = jd.result
+          break
+        }
+        if (jd.status === 'failed') throw new Error(jd.error || 'OCR 실패')
+      }
+    }
+
+    const chords = data.chords || data.result?.chords || []
+    if (chords && chords.length) {
+      lines.value = toLines(chords)
+      message.value = `OCR 완료: ${chords.length}개 라인 인식`
+      emit('updated', { ...props.sheet, chords })
+    } else if (data.ocr_raw_text) {
+      message.value = 'OCR 완료 (원문만 있음)'
+    } else {
+      ocrError.value = 'OCR 결과가 비어있습니다.'
+    }
+  } catch (e) {
+    ocrError.value = e.message || 'OCR 중 오류'
+  } finally {
+    ocrLoading.value = false
+  }
+}
+
 
 const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 const NOTE_IDX = Object.fromEntries(NOTES.map((n,i)=>[n,i]))
@@ -82,10 +138,13 @@ function transposeChordName(name, semitones) {
 function ensureItemT(items) {
   const n = Math.max(items.length, 1)
   return items.map((it, i) => {
+    const base = { ...it, manual: !!it.manual }
     if (typeof it.t === 'number' && !Number.isNaN(it.t)) {
-      return { ...it, t: Math.min(0.98, Math.max(0.02, it.t)) }
+      base.t = Math.min(0.98, Math.max(0.02, it.t))
+      return base
     }
-    return { ...it, t: (i + 0.5) / n }
+    base.t = (i + 0.5) / n
+    return base
   })
 }
 
@@ -104,7 +163,8 @@ function toLines(raw) {
         (L.items || []).map((it, j) => ({
           id: it.id || `i${i}_${j}`,
           chord: it.chord || it.text || '',
-          t: it.t ?? 0.5
+          t: it.t ?? 0.5,
+          manual: !!it.manual
         }))
       ),
     }))
@@ -193,7 +253,7 @@ const paletteChords = computed(() => {
 function lineStyle(line) {
   const h = Math.max(line.height || 0.02, 0.015)
   return {
-    top: `${((line.y || 0) - h - 0.04) * 100}%`,  // 코드 한 개 높이만큼 위로,
+    top: `${((line.y || 0) - h /2 - 0.02) * 100}%`,  // 코드 한 개 높이만큼 위로,
     left: `${(line.xStart || 0) * 100}%`,
     width: `${((line.xEnd || 0.9) - (line.xStart || 0)) * 100}%`,
     height: `${h * 100}%`,
@@ -201,7 +261,15 @@ function lineStyle(line) {
 }
 
 function chordLeftPct(line, item) {
-  return `${(typeof item.t === 'number' ? item.t : 0.5) * 100}%`
+  if (typeof item.t !== 'number') return `50%`
+  if (item.manual) {
+    // 클릭으로 넣은 건 보정 없음 - 클릭한 위치 그대로
+    return `${Math.min(98, Math.max(2, item.t * 100))}%`
+  }
+  // OCR 결과만 보정
+  const scale = 1.04
+  let t2 = item.t * scale
+  return `${Math.min(98, Math.max(2, t2 * 100))}%`
 }
 
 function stageRect() {
@@ -230,7 +298,6 @@ function startDrag(e, type, lineId, itemId = null) {
     lineId,
     itemId,
     moved: false,
-    // 코드줄 전체 이동용 시작 스냅샷
     startX: pos0?.x ?? 0,
     startY: pos0?.y ?? 0,
     origY: line0?.y ?? 0,
@@ -272,15 +339,19 @@ function startDrag(e, type, lineId, itemId = null) {
       // x는 고정 - 코드 절대위치 보존 (이동시키고 싶으면 아래 2줄 주석 해제)
       // const dx = pos.x - drag.value.startX ...
     } else if (t === 'line-h-top') {
-      const fixedBottom = drag.value.origY - 0.04
-      const newTop = pos.y
-      line.height = Math.max(0.012, fixedBottom - newTop)
+      const origTop = drag.value.origY - drag.value.origHeight / 2
+      const origBottom = drag.value.origY + drag.value.origHeight / 2
+      const dy = pos.y - drag.value.startY
+      const newTop = Math.min(origBottom - 0.012, origTop + dy)
+      line.height = Math.max(0.012, origBottom - newTop)
+      line.y = (newTop + origBottom) / 2
     } else if (t === 'line-h-bottom') {
-      const origH = drag.value.origHeight || line.height || 0.032
-      const fixedTop = drag.value.origY - origH - 0.04
-      const newBottom = pos.y
-      line.height = Math.max(0.012, newBottom - fixedTop)
-      line.y = newBottom + 0.04  // ← y가 bottom 따라 내려가야 top이 안 움직임!
+      const origTop = drag.value.origY - drag.value.origHeight / 2
+      const origBottom = drag.value.origY + drag.value.origHeight / 2
+      const dy = pos.y - drag.value.startY
+      const newBottom = Math.max(origTop + 0.012, origBottom + dy)
+      line.height = Math.max(0.012, newBottom - origTop)
+      line.y = (newBottom + origTop) / 2
     } else if (t === 'line-left') {
       const newStart = Math.min(line.xEnd - 0.08, pos.x)
       restoreT(newStart, line.xEnd)
@@ -321,7 +392,6 @@ function onStageClick(e) {
   if (!pos) return
   const ch = placeChord.value
 
-  // 기존 코드줄이 있으면 가장 가까운 줄에만 삽입 (새 줄 자동 생성 안 함)
   if (lines.value.length) {
     let best = null
     let bestDist = Infinity
@@ -329,24 +399,27 @@ function onStageClick(e) {
       const d = Math.abs((L.y || 0) - pos.y)
       if (d < bestDist) { bestDist = d; best = L }
     }
-    // active 줄이 있으면 우선
     const active = lines.value.find((L) => L.id === activeLineId.value)
     const target = active || best
     if (!target) return
     const span = (target.xEnd - target.xStart) || 0.8
     const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - target.xStart) / span))
-    target.items.push({ id: 'n' + Date.now().toString(36), chord: ch, t: tNorm })
+    target.items.push({ 
+      id: 'n' + Date.now().toString(36), 
+      chord: ch, 
+      t: tNorm,
+      manual: true // 클릭 무보정 표시
+    })
     activeLineId.value = target.id
     message.value = `"${ch}" 코드줄에 삽입`
     saveLines()
     return
   }
 
-  // 코드줄이 하나도 없을 때만 새 줄 생성
   const line = {
     id: 'L' + Date.now().toString(36),
     y: pos.y, xStart: 0.08, xEnd: 0.92, height: 0.032,
-    items: [{ id: 'n' + Date.now().toString(36), chord: ch, t: 0.5 }],
+    items: [{ id: 'n' + Date.now().toString(36), chord: ch, t: 0.5, manual: true }],
   }
   lines.value.push(line)
   activeLineId.value = line.id
@@ -356,7 +429,6 @@ function onStageClick(e) {
 
 function onLineClick(e, line) {
   e.stopPropagation()
-  // displayLines는 복사본이므로 반드시 lines 원본을 수정
   const L = lines.value.find((x) => x.id === line.id) || line
   activeLineId.value = L.id
   if (!placeChord.value) return
@@ -365,7 +437,7 @@ function onLineClick(e, line) {
   if (!Array.isArray(L.items)) L.items = []
   const span = (L.xEnd - L.xStart) || 0.8
   const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - L.xStart) / span))
-  L.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t: tNorm })
+  L.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t: tNorm, manual: true })
   message.value = `"${placeChord.value}" 코드줄에 삽입`
   saveLines()
 }
@@ -382,7 +454,19 @@ function startEdit(lineId, item) {
   const L = lines.value.find(x => x.id === lineId)
   const it = L?.items?.find(x => x.id === item.id)
   editValue.value = it?.chord || item.chord || ''
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      const key = `${lineId}:${item.id}`
+      const input = document.querySelector(`.chip input[data-edit-key="${key}"]`)
+      if (input) {
+        input.focus()
+        const len = input.value.length
+        try { input.setSelectionRange(len, len) } catch(e) {}
+      }
+    }, 0)
+  })
 }
+
 function confirmEdit(lineId, item) {
   if (editKey.value !== `${lineId}:${item.id}`) return
   const L = lines.value.find(x => x.id === lineId)
@@ -401,7 +485,12 @@ function removeItem(line, itemId) {
   if (!L.items.length) lines.value = lines.value.filter((x) => x.id !== L.id)
   saveLines()
 }
-function pickRoot(root) { selectedRoot.value = root; placeChord.value = '' }
+function pickRoot(root) { 
+  selectedRoot.value = root
+  const list = VARIANTS[root] || [root]
+  placeChord.value = list[0] || root
+  message.value = `"${placeChord.value}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
+}
 function pickVariant(ch) {
   placeChord.value = ch
   message.value = `"${ch}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
@@ -446,13 +535,13 @@ async function saveLines() {
   try {
     let res
     if (isTemp()) {
-      res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
+      res = await fetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
       })
     } else {
-      res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
+      res = await fetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -484,7 +573,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
         force_new: forceNew,
       }
       if (mergeSongId) body.merge_song_id = mergeSongId
-      const res = await apiFetch('/api/songs/from-temp/', {
+      const res = await fetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -499,7 +588,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
       emit('updated', { ...data, is_temp: false })
       message.value = '보정본 저장됨 (DB 등록)'
     } else {
-      const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
+      const res = await fetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -529,7 +618,7 @@ async function confirmSheet() {
         chords: lines.value,
         force_new: true,
       }
-      let res = await apiFetch('/api/songs/from-temp/', {
+      let res = await fetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -538,7 +627,7 @@ async function confirmSheet() {
       if (res.status === 409 && data.error === 'duplicate_title') {
         // 확정 흐름에서는 새 곡으로 강제 저장
         body.force_new = true
-        res = await apiFetch('/api/songs/from-temp/', {
+        res = await fetch('/api/songs/from-temp/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -557,7 +646,7 @@ async function confirmSheet() {
     if (!songId) throw new Error('곡 ID가 없습니다')
 
     // 수정본 이미지 렌더 (Song API)
-    let res = await apiFetch(`/api/songs/${songId}/render_variant/`, {
+    let res = await fetch(`/api/songs/${songId}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -613,13 +702,11 @@ const resultUrl = computed(() => {
     <div class="top-actions">
       <button class="back" @click="emit('back')">← 목록</button>
     </div>
-    <h2>{{ sheet.title || '제목 없음' }}</h2>
-    <div v-if="dupCandidates.length" class="dup-box">
-      <p>같은 제목의 곡이 있습니다. 선택하세요:</p>
-      <button v-for="c in dupCandidates" :key="c.id" type="button" @click="saveBase(c.id)">
-        「{{ c.title }}」에 합치기 (코드 {{ (c.variants || []).length }})
-      </button>
-      <button type="button" class="force" @click="saveBase(null, true)">새 곡으로 저장</button>
+    <div class="ocr-bar">
+      <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">{{ ocrLoading ? 'OCR 중...' : 'OCR 다시 실행' }}</button>
+      <span v-if="ocrError" class="ocr-error">{{ ocrError }}</span>
+      <span v-else class="ocr-hint" style="color:#d00; font-weight:700;">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
+      <span v-if="message" class="msg" style="margin-left:8px">{{ message }}</span>
     </div>
     <div class="size-bar">
       <span>코드 크기</span>
@@ -654,7 +741,7 @@ const resultUrl = computed(() => {
             @dblclick.stop="startEdit(line.id, item)"
           >
             <template v-if="editKey === line.id + ':' + item.id">
-              <input v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
+              <input :data-edit-key="line.id + ':' + item.id" v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
             </template>
             <template v-else>
               <span>{{ item.chord }}</span>
@@ -696,7 +783,6 @@ const resultUrl = computed(() => {
     <button class="confirm" :disabled="confirming || !lines.length" @click="confirmSheet">
       {{ confirming ? '확정 중…' : '확정 · 조옮김 단계로' }}
     </button>
-    <p v-if="message" class="msg">{{ message }}</p>
     <section v-if="pageMode !== 'correct' && resultUrl" class="result-section">
       <h3>생성된 기타 코드 악보</h3>
       <img :src="resultUrl" alt="결과 악보" class="result-img" />
@@ -711,6 +797,11 @@ const resultUrl = computed(() => {
 .back { background: none; border: none; cursor: pointer; color: #1a1a2e; }
 .meta { font-size: 0.85rem; color: #666; }
 .hint { font-size: 0.85rem; color: #444; background: #f5f7fa; padding: 0.6rem 0.8rem; border-radius: 6px; line-height: 1.5; }
+.ocr-bar { display: flex; gap: 0.6rem; align-items: center; padding: 0.6rem 0.8rem; background: #f0f6ff; border: 1px solid #c5d9ff; border-radius: 8px; flex-wrap: wrap; }
+.ocr-btn { padding: 0.5rem 0.9rem; background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; }
+.ocr-btn:disabled { opacity: 0.6; }
+.ocr-error { color: #c00; font-size: 0.85rem; }
+.ocr-hint { color: #555; font-size: 0.85rem; }
 .mode-bar { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .mode-bar button { padding: 0.4rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-weight: 600; }
 .mode-bar button.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
@@ -743,7 +834,7 @@ const resultUrl = computed(() => {
   touch-action: none;
   box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
-.stage.placing { cursor: crosshair; outline: 2px solid #0d6efd; outline-offset: -2px; }
+.stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
 .score-img {
   display: block;
   width: 100%;

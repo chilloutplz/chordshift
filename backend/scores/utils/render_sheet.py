@@ -62,7 +62,7 @@ def render_transposed_sheet(image_path: str, chords: list) -> ContentFile:
         font = _get_font(font_size)
 
         # 프론트와 동일 오프셋: top = y - h
-        py0 = max(0, int((y - band_h_n - 0.04) * h))
+        py0 = max(0, int((y - band_h_n) * h))
         py1 = min(h, py0 + band_h)
         px0 = max(0, int(x0 * w) - 2)
         px1 = min(w, int(x1 * w) + 2)

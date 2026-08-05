@@ -13,6 +13,7 @@ urlpatterns = [
     path('temp/upload/', song_views.temp_upload, name='temp-upload'),
     path('temp/<str:temp_id>/chords/', song_views.temp_update_chords, name='temp-update-chords'),
     path('temp/<str:temp_id>/ocr/', song_views.temp_ocr, name='temp-ocr'),
+    path('temp/job/<str:job_id>/', song_views.temp_job_status, name='temp-job-status'),
     path('temp/<str:temp_id>/', song_views.temp_delete, name='temp-delete'),
     path('songs/from-temp/', song_views.song_from_temp, name='song-from-temp'),
     path('', include(router.urls)),
