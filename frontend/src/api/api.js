@@ -2,7 +2,7 @@
 // 백엔드 URL을 환경변수로 관리, apiFetch로만 호출
 
 export const API_BASE = 
-  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+  import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 export function apiUrl(path) {
   // path는 반드시 /api/ 로 시작
