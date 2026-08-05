@@ -26,6 +26,8 @@ const confirming = ref(false)
 const message = ref('')
 const ocrLoading = ref(false)
 const ocrError = ref('')
+// OCR 큐 대기 정보 - { status: 'queued'|'processing', aheadCount, estimatedWaitSeconds }
+const ocrQueueInfo = ref(null)
 const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
@@ -67,6 +69,7 @@ async function runOcr() {
   }
   ocrLoading.value = true
   ocrError.value = ''
+  ocrQueueInfo.value = null
   try {
     // 1차: /ocr/ 호출 (job 방식 또는 sync 방식 둘 다 대응)
     let res = await apiFetch(`/api/temp/${temp_id}/ocr/`, { method: 'POST' })
@@ -88,6 +91,18 @@ async function runOcr() {
         const jr = await apiFetch(`/api/temp/job/${jobId}/`)
         if (!jr.ok) continue
         const jd = await jr.json()
+
+        if (jd.status === 'queued') {
+          ocrQueueInfo.value = {
+            status: 'queued',
+            aheadCount: jd.ahead_count ?? 0,
+            estimatedWaitSeconds: jd.estimated_wait_seconds ?? null,
+          }
+          continue
+        }
+        if (jd.status === 'processing') {
+          ocrQueueInfo.value = { status: 'processing' }
+        }
         if (jd.status === 'done' && jd.result) {
           data = jd.result
           break
@@ -110,6 +125,7 @@ async function runOcr() {
     ocrError.value = e.message || 'OCR 중 오류'
   } finally {
     ocrLoading.value = false
+    ocrQueueInfo.value = null
   }
 }
 
@@ -695,6 +711,20 @@ const resultUrl = computed(() => {
   }
   return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
 })
+
+const ocrStatusText = computed(() => {
+  const q = ocrQueueInfo.value
+  if (!q) return 'OCR 처리 중...'
+  if (q.status === 'queued') {
+    const ahead = q.aheadCount ?? 0
+    if (ahead <= 0) return '곧 시작합니다...'
+    const wait = q.estimatedWaitSeconds
+    return wait
+      ? `앞에 ${ahead}명 대기 중 · 약 ${Math.round(wait)}초 예상`
+      : `앞에 ${ahead}명 대기 중...`
+  }
+  return '악보를 분석하는 중...'
+})
 </script>
 
 <template>
@@ -704,7 +734,11 @@ const resultUrl = computed(() => {
     </div>
     <div class="ocr-bar">
       <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">{{ ocrLoading ? 'OCR 중...' : 'OCR 다시 실행' }}</button>
-      <span v-if="ocrError" class="ocr-error">{{ ocrError }}</span>
+      <span v-if="ocrLoading" class="ocr-status">
+        <span class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
+        {{ ocrStatusText }}
+      </span>
+      <span v-else-if="ocrError" class="ocr-error">{{ ocrError }}</span>
       <span v-else class="ocr-hint" style="color:#d00; font-weight:700;">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
       <span v-if="message" class="msg" style="margin-left:8px">{{ message }}</span>
     </div>
@@ -717,6 +751,21 @@ const resultUrl = computed(() => {
     <div class="stage-frame" v-if="sheet.optimized_image">
     <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" @click="onStageClick">
       <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
+      <div v-if="ocrLoading" class="ocr-scan-overlay">
+        <div class="ocr-scan-info">
+          <span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" />
+          <span>{{ ocrStatusText }}</span>
+        </div>
+        <div class="ocr-scan-track">
+          <div class="ocr-scan-line" />
+          <div class="ocr-scan-glass">
+            <svg viewBox="0 0 24 24" width="34" height="34" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="10.5" cy="10.5" r="6.5" stroke="#0d6efd" stroke-width="2.4"/>
+              <line x1="15.3" y1="15.3" x2="21" y2="21" stroke="#0d6efd" stroke-width="2.4" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+      </div>
       <div
         v-for="line in displayLines"
         :key="line.id"
@@ -802,6 +851,81 @@ const resultUrl = computed(() => {
 .ocr-btn:disabled { opacity: 0.6; }
 .ocr-error { color: #c00; font-size: 0.85rem; }
 .ocr-hint { color: #555; font-size: 0.85rem; }
+.ocr-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #0d6efd; font-weight: 600; }
+.ocr-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #0d6efd;
+  animation: ocr-dot-pulse 1s ease-in-out infinite;
+}
+.ocr-status-dot.queued { background: #f5a623; }
+@keyframes ocr-dot-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* --- OCR 진행 중 돋보기 스캔 오버레이 --- */
+.ocr-scan-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(1.5px);
+}
+.ocr-scan-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  background: rgba(26, 26, 46, 0.88);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.ocr-scan-spinner {
+  width: 12px; height: 12px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: ocr-spin 0.8s linear infinite;
+}
+@keyframes ocr-spin { to { transform: rotate(360deg); } }
+.ocr-scan-track {
+  position: relative;
+  width: 78%;
+  max-width: 420px;
+  height: 64px;
+}
+.ocr-scan-line {
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(13,110,253,0.65), transparent);
+  animation: ocr-line-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ocr-line-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.ocr-scan-glass {
+  position: absolute;
+  top: 50%;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.25));
+  animation: ocr-glass-sweep 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@keyframes ocr-glass-sweep {
+  0%   { left: 0%;   transform: translate(0, -50%) rotate(-8deg); }
+  25%  { left: 50%;  transform: translate(-50%, -65%) rotate(8deg); }
+  50%  { left: 100%; transform: translate(-100%, -50%) rotate(-8deg); }
+  75%  { left: 50%;  transform: translate(-50%, -35%) rotate(8deg); }
+  100% { left: 0%;   transform: translate(0, -50%) rotate(-8deg); }
+}
 .mode-bar { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .mode-bar button { padding: 0.4rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-weight: 600; }
 .mode-bar button.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }

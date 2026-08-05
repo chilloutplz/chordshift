@@ -1,6 +1,8 @@
 """Song repository + temp upload APIs - 분리형 (502 해결)"""
 import threading
+import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 from django.conf import settings
@@ -18,6 +20,18 @@ from .utils.temp_store import save_temp_image, load_meta, save_meta, image_path,
 
 # --- 502 해결용: 메모리에서 job 관리 (단순 버전) ---
 JOBS = {}
+
+# 메모리 0.5GB 환경에서 OCR 동시 실행 시 OOM으로 워커가 죽는 문제 방지
+# → RapidOCR 추론은 한 번에 하나씩만 돌게 강제 (동시 업로드 시 순차 대기)
+_OCR_SEMAPHORE = threading.Semaphore(1)
+
+# 대기 순번 계산용 - 도착한 순서대로 job_id를 쌓아두고, 처리 시작하면 빼냄
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_ORDER = []
+
+# 최근 완료된 OCR 소요시간(초) - 다음 대기자의 예상 대기시간 추정에 사용
+_RECENT_DURATIONS = deque(maxlen=5)
+_DEFAULT_DURATION_ESTIMATE = 25  # 이력이 없을 때 쓸 기본 추정치(초), 로그 상 실측 평균 근사치
 
 @api_view(['POST'])
 def temp_upload(request):
@@ -59,19 +73,33 @@ def temp_ocr(request, temp_id):
         return Response({'error': '임시 파일 없음'}, status=404)
 
     job_id = str(uuid.uuid4())[:12]
-    JOBS[job_id] = {"status": "processing", "temp_id": temp_id, "result": None}
+    JOBS[job_id] = {"status": "queued", "temp_id": temp_id, "result": None}
+
+    with _QUEUE_LOCK:
+        _QUEUE_ORDER.append(job_id)
 
     def do_ocr_job():
-        try:
-            from .utils.ocr import run_ocr as do_ocr
-            result = do_ocr(str(path))
-            meta = load_meta(temp_id) or {'temp_id': temp_id}
-            meta['chords'] = result.get('chords') or result.get('chord_lines') or []
-            meta['ocr_raw_text'] = result.get('raw_text', '')
-            save_meta(temp_id, meta)
-            JOBS[job_id] = {"status": "done", "temp_id": temp_id, "result": meta}
-        except Exception as e:
-            JOBS[job_id] = {"status": "failed", "temp_id": temp_id, "error": str(e)}
+        with _OCR_SEMAPHORE:
+            # 세마포어 획득 = 내 차례가 됨 → 큐에서 제거
+            with _QUEUE_LOCK:
+                try:
+                    _QUEUE_ORDER.remove(job_id)
+                except ValueError:
+                    pass
+            JOBS[job_id] = {"status": "processing", "temp_id": temp_id, "result": None}
+            started_at = time.time()
+            try:
+                from .utils.ocr import run_ocr as do_ocr
+                result = do_ocr(str(path))
+                meta = load_meta(temp_id) or {'temp_id': temp_id}
+                meta['chords'] = result.get('chords') or result.get('chord_lines') or []
+                meta['ocr_raw_text'] = result.get('raw_text', '')
+                save_meta(temp_id, meta)
+                JOBS[job_id] = {"status": "done", "temp_id": temp_id, "result": meta}
+            except Exception as e:
+                JOBS[job_id] = {"status": "failed", "temp_id": temp_id, "error": str(e)}
+            finally:
+                _RECENT_DURATIONS.append(time.time() - started_at)
 
     threading.Thread(target=do_ocr_job, daemon=True).start()
 
@@ -84,7 +112,22 @@ def temp_job_status(request, job_id):
     job = JOBS.get(job_id)
     if not job:
         return Response({'error': 'job 없음'}, status=404)
-    return Response(job)
+
+    resp = dict(job)
+    if job.get('status') == 'queued':
+        with _QUEUE_LOCK:
+            try:
+                position = _QUEUE_ORDER.index(job_id)  # 0 = 바로 다음 차례
+            except ValueError:
+                position = 0
+        avg_duration = (
+            sum(_RECENT_DURATIONS) / len(_RECENT_DURATIONS)
+            if _RECENT_DURATIONS else _DEFAULT_DURATION_ESTIMATE
+        )
+        resp['ahead_count'] = position
+        resp['estimated_wait_seconds'] = round(position * avg_duration + avg_duration, 1)
+
+    return Response(resp)
 
 
 @api_view(['PATCH', 'POST'])
