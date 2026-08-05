@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { apiFetch } from '@/api/api.js'
+import { API_BASE, apiFetch } from '@/api/api.js'
 
 const props = defineProps({ sheet: { type: Object, required: true } })
 const emit = defineEmits(['updated', 'back', 'edit'])
@@ -97,9 +97,9 @@ watch(
 
 const resultUrl = computed(() => withCache(lastVariantUrl.value || props.sheet.result_image || ''))
 
+// 이미지 URL 바뀔 때마다 로딩 시작
 watch(resultUrl, (url) => {
-  // 강제 리로드를 위해 imageLoading은 showVariant에서만 제어
-  if (url) console.log('[img] resultUrl changed', url)
+  if (url) imageLoading.value = true
 }, { immediate: true })
 
 function onImageLoad() {
@@ -214,11 +214,30 @@ async function downloadResult() {
 }
 
 function showVariant(v) {
-  if (v?.image) {
-    imageLoading.value = true
-    lastVariantUrl.value = v.image
-    semitones.value = normalizeSemitones(v.transpose_semitones || 0)
+  if (v?.image)
+  if (lastVariantUrl.value === v.image) return
+  imageLoading.value = true
+  lastVariantUrl.value = v.image
+  semitones.value = normalizeSemitones(v.transpose_semitones || 0)
+}
+
+async function deleteVariant(v) {
+  if (!v?.id) return
+  const isCorrected = (v.transpose_semitones === 0)
+  const msg = isCorrected
+    ? '원본을 삭제하면\n조옮김 악보를 포함한 곡 전체가 영구 삭제되며 복구할 수 없습니다.\n정말 삭제하시겠습니까?'
+    : `「${v.label}」 버전을 삭제할까요?`
+  if (!confirm(msg)) return
+  const res = await apiFetch(`/api/songs/${props.sheet.id}/variants/${v.id}/`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(()=>({}))
+    alert(err.error || '삭제 실패')
+    return
   }
+  const data = await res.json()
+  if (data.deleted === 'song') { emit('back'); return }
+  localVariants.value = data.variants || localVariants.value.filter(x=>x.id!==v.id)
+  emit('updated', data)
 }
 </script>
 
@@ -254,23 +273,23 @@ function showVariant(v) {
     <section v-if="localVariants.length" class="variants">
       <h3>저장된 코드</h3>
       <div class="var-list">
-        <button
-          v-for="v in localVariants"
-          :key="v.id"
-          type="button"
-          class="var-chip"
-          :class="{ on: lastVariantUrl && v.image && lastVariantUrl.includes(String(v.id)) === false && lastVariantUrl === v.image }"
-          @click="showVariant(v)"
-        >
-          {{ v.label || ((v.transpose_semitones > 0 ? '+' : '') + v.transpose_semitones) }}
-        </button>
+        <div class="var-item" v-for="v in localVariants" :key="v.id">
+          <button
+            type="button"
+            class="var-chip"
+            :class="{ on: lastVariantUrl && v.image && lastVariantUrl === v.image, corrected: v.transpose_semitones === 0 }"
+            @click="showVariant(v)"
+          >
+            {{ v.transpose_semitones === 0 ? `원본(${v.label || '보정본'})` : (v.label || ((v.transpose_semitones > 0 ? '+' : '') + v.transpose_semitones)) }}
+          </button>
+          <button type="button" class="var-del" @click.stop="deleteVariant(v)">✕</button>
+        </div>
       </div>
     </section>
 
     <section v-if="resultUrl || rendering" class="result">
-      <h3>결과 악보</h3>
       <div class="img-wrap">
-        <div v-if="rendering" class="img-loading">
+        <div v-if="rendering || imageLoading" class="img-loading">
           <div class="spinner"></div>
           <p>결과 악보를 생성·저장하는 중…</p>
         </div>
@@ -343,4 +362,7 @@ function showVariant(v) {
   background: #fff; cursor: pointer; font-size: 0.85rem;
 }
 .var-chip.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.var-chip.corrected { background:#1a1a2e; color:#fff; border-color:#1a1a2e; font-weight:700; }
+.var-item { display:flex; align-items:center; gap:0.2rem; }
+.var-del { background:none; border:none; cursor:pointer; color:#c00; font-weight:700; padding:0 0.3rem; }
 </style>
