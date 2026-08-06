@@ -28,6 +28,10 @@ const ocrLoading = ref(false)
 const ocrError = ref('')
 // OCR 큐 대기 정보 - { status: 'queued'|'processing', aheadCount, estimatedWaitSeconds }
 const ocrQueueInfo = ref(null)
+// 이 시트에 대해 OCR을 이미 한 번이라도 실행한 적 있는지
+// - 열었을 때 이미 인식된 코드/원문이 있으면 재실행으로 간주 (예: 저장 후 다시 들어온 경우)
+// - 처음 업로드해서 아직 OCR 안 돌린 상태면 false
+const ocrHasRun = ref(!!(props.sheet.chords?.length || props.sheet.ocr_raw_text))
 const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
@@ -67,6 +71,7 @@ async function runOcr() {
     ocrError.value = '임시 ID가 없습니다. 다시 업로드하세요.'
     return
   }
+  const isRerun = ocrHasRun.value  // 이번 호출이 재실행인지 시작 시점에 미리 기억
   ocrLoading.value = true
   ocrError.value = ''
   ocrQueueInfo.value = null
@@ -114,10 +119,14 @@ async function runOcr() {
     const chords = data.chords || data.result?.chords || []
     if (chords && chords.length) {
       lines.value = toLines(chords)
-      message.value = `OCR 완료: ${chords.length}개 라인 인식`
+      message.value = isRerun
+        ? `OCR 재실행 완료: ${chords.length}개 라인 인식 (기존 수정 내용은 대체되었습니다)`
+        : `OCR 완료: ${chords.length}개 라인 인식`
+      ocrHasRun.value = true
       emit('updated', { ...props.sheet, chords })
     } else if (data.ocr_raw_text) {
-      message.value = 'OCR 완료 (원문만 있음)'
+      message.value = isRerun ? 'OCR 재실행 완료 (원문만 있음)' : 'OCR 완료 (원문만 있음)'
+      ocrHasRun.value = true
     } else {
       ocrError.value = 'OCR 결과가 비어있습니다.'
     }
@@ -247,6 +256,7 @@ function toLines(raw) {
 watch(() => props.sheet, (s) => {
   lines.value = toLines(s.chords)
   semitones.value = s.transpose_semitones || 0
+  ocrHasRun.value = !!(s.chords?.length || s.ocr_raw_text)
 }, { immediate: true })
 
 const displayLines = computed(() => {
@@ -551,13 +561,13 @@ async function saveLines() {
   try {
     let res
     if (isTemp()) {
-      res = await fetch(`/api/temp/${sheetId()}/chords/`, {
+      res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
       })
     } else {
-      res = await fetch(`/api/songs/${props.sheet.id}/`, {
+      res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -589,7 +599,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
         force_new: forceNew,
       }
       if (mergeSongId) body.merge_song_id = mergeSongId
-      const res = await fetch('/api/songs/from-temp/', {
+      const res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -604,7 +614,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
       emit('updated', { ...data, is_temp: false })
       message.value = '보정본 저장됨 (DB 등록)'
     } else {
-      const res = await fetch(`/api/songs/${props.sheet.id}/`, {
+      const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chords: lines.value }),
@@ -634,7 +644,7 @@ async function confirmSheet() {
         chords: lines.value,
         force_new: true,
       }
-      let res = await fetch('/api/songs/from-temp/', {
+      let res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -643,7 +653,7 @@ async function confirmSheet() {
       if (res.status === 409 && data.error === 'duplicate_title') {
         // 확정 흐름에서는 새 곡으로 강제 저장
         body.force_new = true
-        res = await fetch('/api/songs/from-temp/', {
+        res = await apiFetch('/api/songs/from-temp/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -662,7 +672,7 @@ async function confirmSheet() {
     if (!songId) throw new Error('곡 ID가 없습니다')
 
     // 수정본 이미지 렌더 (Song API)
-    let res = await fetch(`/api/songs/${songId}/render_variant/`, {
+    let res = await apiFetch(`/api/songs/${songId}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -714,7 +724,8 @@ const resultUrl = computed(() => {
 
 const ocrStatusText = computed(() => {
   const q = ocrQueueInfo.value
-  if (!q) return 'OCR 처리 중...'
+  const verb = ocrHasRun.value ? '재분석' : '분석'
+  if (!q) return `OCR ${verb} 중...`
   if (q.status === 'queued') {
     const ahead = q.aheadCount ?? 0
     if (ahead <= 0) return '곧 시작합니다...'
@@ -723,7 +734,7 @@ const ocrStatusText = computed(() => {
       ? `앞에 ${ahead}명 대기 중 · 약 ${Math.round(wait)}초 예상`
       : `앞에 ${ahead}명 대기 중...`
   }
-  return '악보를 분석하는 중...'
+  return `악보를 ${verb}하는 중...`
 })
 </script>
 
@@ -733,13 +744,16 @@ const ocrStatusText = computed(() => {
       <button class="back" @click="emit('back')">← 목록</button>
     </div>
     <div class="ocr-bar">
-      <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">{{ ocrLoading ? 'OCR 중...' : 'OCR 다시 실행' }}</button>
+      <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">
+        {{ ocrLoading ? (ocrHasRun ? '재실행 중...' : 'OCR 중...') : (ocrHasRun ? 'OCR 다시 실행' : 'OCR 실행') }}
+      </button>
       <span v-if="ocrLoading" class="ocr-status">
         <span class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
         {{ ocrStatusText }}
       </span>
       <span v-else-if="ocrError" class="ocr-error">{{ ocrError }}</span>
-      <span v-else class="ocr-hint" style="color:#d00; font-weight:700;">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
+      <span v-else-if="ocrHasRun" class="ocr-hint" style="color:#d00; font-weight:700;">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
+      <span v-else class="ocr-hint">업로드한 이미지에서 기타 코드를 자동으로 인식합니다</span>
       <span v-if="message" class="msg" style="margin-left:8px">{{ message }}</span>
     </div>
     <div class="size-bar">

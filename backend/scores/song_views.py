@@ -1,4 +1,6 @@
 """Song repository + temp upload APIs - 분리형 (502 해결)"""
+import ctypes
+import gc
 import threading
 import time
 import uuid
@@ -17,6 +19,22 @@ from .models import Song, ScoreVariant
 from .serializers import SongSerializer, ScoreVariantSerializer
 from .utils.image_process import optimize_for_mobile
 from .utils.temp_store import save_temp_image, load_meta, save_meta, image_path, delete_temp, cleanup_old_temps
+
+
+def _release_memory():
+    """
+    OCR 작업 직후 호출 - Python GC로 참조 끊긴 객체 정리 + glibc에게
+    안 쓰는 힙 메모리를 OS에 반납하도록 요청 (malloc_trim).
+    0.5GB 메모리 환경에서 '방금 끝난 OCR의 잔여 메모리 위에 다음 OCR이
+    얹혀서 OOM 나는' 패턴을 완화하기 위함. 100% 보장은 아니지만 비용 없음.
+    """
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:
+        pass
+
 
 # --- 502 해결용: 메모리에서 job 관리 (단순 버전) ---
 JOBS = {}
@@ -100,6 +118,7 @@ def temp_ocr(request, temp_id):
                 JOBS[job_id] = {"status": "failed", "temp_id": temp_id, "error": str(e)}
             finally:
                 _RECENT_DURATIONS.append(time.time() - started_at)
+                _release_memory()
 
     threading.Thread(target=do_ocr_job, daemon=True).start()
 
