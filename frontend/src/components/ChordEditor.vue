@@ -282,9 +282,11 @@ const paletteChords = computed(() => {
 })
 
 function lineStyle(line) {
-  const h = Math.max(line.height || 0.02, 0.015)
+  // y = 코드줄 세로 중앙, height = 띠 높이 (정규화 0~1)
+  const h = Math.max(line.height || 0.028, 0.015)
+  const y = line.y ?? 0.1
   return {
-    top: `${((line.y || 0) - h /2 - 0.02) * 100}%`,  // 코드 한 개 높이만큼 위로,
+    top: `${(y - h / 2) * 100}%`,
     left: `${(line.xStart || 0) * 100}%`,
     width: `${((line.xEnd || 0.9) - (line.xStart || 0)) * 100}%`,
     height: `${h * 100}%`,
@@ -292,15 +294,9 @@ function lineStyle(line) {
 }
 
 function chordLeftPct(line, item) {
-  if (typeof item.t !== 'number') return `50%`
-  if (item.manual) {
-    // 클릭으로 넣은 건 보정 없음 - 클릭한 위치 그대로
-    return `${Math.min(98, Math.max(2, item.t * 100))}%`
-  }
-  // OCR 결과만 보정
-  const scale = 1.04
-  let t2 = item.t * scale
-  return `${Math.min(98, Math.max(2, t2 * 100))}%`
+  // t = 줄 안 상대 위치 (0~1). 보정 배율 없이 그대로 표시
+  if (typeof item.t !== 'number' || Number.isNaN(item.t)) return '50%'
+  return `${Math.min(98, Math.max(2, item.t * 100))}%`
 }
 
 function stageRect() {
@@ -324,6 +320,18 @@ function startDrag(e, type, lineId, itemId = null) {
   activeLineId.value = lineId
   const line0 = lines.value.find((L) => L.id === lineId)
   const pos0 = normFromEvent(e)
+  // 코드 드래그 시: 클릭 지점과 코드 중앙의 차이를 보존 (선택 순간 점프 방지)
+  let chordGrabOffset = 0
+  let origChordT = 0.5
+  if (type === 'chord-x' && line0 && itemId) {
+    const item0 = (line0.items || []).find((it) => it.id === itemId)
+    const span0 = (line0.xEnd ?? 0.99) - (line0.xStart ?? 0.01)
+    origChordT = typeof item0?.t === 'number' ? item0.t : 0.5
+    if (span0 > 0.001 && pos0) {
+      const centerAbs = (line0.xStart ?? 0.01) + origChordT * span0
+      chordGrabOffset = pos0.x - centerAbs
+    }
+  }
   drag.value = {
     type,
     lineId,
@@ -336,6 +344,8 @@ function startDrag(e, type, lineId, itemId = null) {
     origXStart: line0?.xStart ?? 0.01,
     origXEnd: line0?.xEnd ?? 0.99,
     origAbs: null,
+    chordGrabOffset,
+    origChordT,
   }
   const onMove = (ev) => {
     const pos = normFromEvent(ev)
@@ -370,17 +380,15 @@ function startDrag(e, type, lineId, itemId = null) {
       // x는 고정 - 코드 절대위치 보존 (이동시키고 싶으면 아래 2줄 주석 해제)
       // const dx = pos.x - drag.value.startX ...
     } else if (t === 'line-h-top') {
-      const origTop = drag.value.origY - drag.value.origHeight / 2
+      // 위 가장자리를 포인터 위치로 직접 맞춤 (더 직관적)
       const origBottom = drag.value.origY + drag.value.origHeight / 2
-      const dy = pos.y - drag.value.startY
-      const newTop = Math.min(origBottom - 0.012, origTop + dy)
+      const newTop = Math.min(origBottom - 0.012, Math.max(0.005, pos.y))
       line.height = Math.max(0.012, origBottom - newTop)
       line.y = (newTop + origBottom) / 2
     } else if (t === 'line-h-bottom') {
+      // 아래 가장자리를 포인터 위치로 직접 맞춤
       const origTop = drag.value.origY - drag.value.origHeight / 2
-      const origBottom = drag.value.origY + drag.value.origHeight / 2
-      const dy = pos.y - drag.value.startY
-      const newBottom = Math.max(origTop + 0.012, origBottom + dy)
+      const newBottom = Math.max(origTop + 0.012, Math.min(0.995, pos.y))
       line.height = Math.max(0.012, newBottom - origTop)
       line.y = (newBottom + origTop) / 2
     } else if (t === 'line-left') {
@@ -396,8 +404,11 @@ function startDrag(e, type, lineId, itemId = null) {
       const item = line.items.find((it) => it.id === drag.value.itemId)
       if (!item) return
       const span = line.xEnd - line.xStart
-      if (span <= 0) return
-      item.t = Math.min(0.98, Math.max(0.02, (pos.x - line.xStart) / span))
+      if (span <= 0.001) return
+      // 포인터 - 클릭오프셋 = 코드 중앙이 되어야 할 절대 x
+      const centerAbs = pos.x - (drag.value.chordGrabOffset || 0)
+      const nt = (centerAbs - line.xStart) / span
+      item.t = Math.min(0.98, Math.max(0.02, nt))
     }
   }
   const onUp = () => {
@@ -1022,10 +1033,36 @@ const ocrStatusText = computed(() => {
   opacity: 1;
   background: rgba(13, 110, 253, 0.2);
 }
-.handle.left { left: -2px; top: 0; bottom: 0; width: 3px; cursor: ew-resize; }
-.handle.right { right: -2px; top: 0; bottom: 0; width: 3px; cursor: ew-resize; }
-.handle.top { top: -2px; left: 0; right: 0; height: 3px; cursor: ns-resize; }
-.handle.bottom { bottom: -2px; left: 0; right: 0; height: 3px; cursor: ns-resize; }
+.handle.left { left: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
+.handle.right { right: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
+.handle.top { top: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; }
+.handle.bottom { bottom: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; }
+.handle.top::after,
+.handle.bottom::after {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  height: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #3b82f6;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+.handle.left::after,
+.handle.right::after {
+  content: '';
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #3b82f6;
+  border-radius: 2px;
+  opacity: 0.85;
+}
 .items-layer { position: absolute; inset: 0; pointer-events: none; }
 .chip {
   position: absolute;

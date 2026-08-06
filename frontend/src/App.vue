@@ -5,7 +5,14 @@ import ChordEditor from './components/ChordEditor.vue'
 import TransposePage from './components/TransposePage.vue'
 import { apiFetch } from './api/api.js'
 
-// home | correct | transpose
+/**
+ * 커피 한 잔 기부 링크
+ * - Buy Me a Coffee: https://www.buymeacoffee.com/아이디
+ * - Ko-fi: https://ko-fi.com/아이디
+ * - 토스 송금 등 원하는 URL로 바꾸세요
+ */
+const COFFEE_URL = 'https://www.buymeacoffee.com/chordshift'
+
 const page = ref('home')
 const currentSheet = ref(null)
 const ocrUsage = ref(null)
@@ -13,27 +20,20 @@ const ocrUsage = ref(null)
 async function loadOcrUsage() {
   try {
     const res = await apiFetch('/api/ocr-usage/')
-    if (res.ok) {
-      ocrUsage.value = await res.json()
-    }
-  } catch (_) {
-    /* ignore */
-  }
+    if (res.ok) ocrUsage.value = await res.json()
+  } catch (_) {}
 }
 
 function openSheet(sheet) {
   currentSheet.value = sheet
-  page.value = sheet.result_image || (sheet.variants && sheet.variants.length) ? 'transpose' : 'correct'
+  page.value =
+    sheet.result_image || (sheet.variants && sheet.variants.length) ? 'transpose' : 'correct'
 }
 
 function onUpdated(sheet) {
   currentSheet.value = sheet
-  // OCR 직후 사용량 갱신
-  if (sheet?.ocr_usage) {
-    ocrUsage.value = sheet.ocr_usage
-  } else {
-    loadOcrUsage()
-  }
+  if (sheet?.ocr_usage) ocrUsage.value = sheet.ocr_usage
+  else loadOcrUsage()
 }
 
 function backHome() {
@@ -56,24 +56,29 @@ onMounted(loadOcrUsage)
 
 <template>
   <div class="app">
-    <header>
-      <div class="header-top">
-        <div>
-          <h1>ChordShift</h1>
-          <p class="subtitle">기타 악보 OCR · 조옮김 · 저장</p>
-        </div>
+    <header class="topbar">
+      <button type="button" class="brand" @click="backHome" :title="page !== 'home' ? '홈으로' : ''">
+        <span class="logo" aria-hidden="true">♪</span>
+        <span class="brand-text">
+          <span class="name">ChordShift</span>
+          <span class="tag">기타 악보 OCR · 조옮김</span>
+        </span>
+      </button>
+
+      <div class="topbar-actions">
         <div
           v-if="ocrUsage"
           class="ocr-badge"
           :class="{ warn: ocrUsage.remaining <= 50, danger: ocrUsage.exceeded }"
-          :title="`${ocrUsage.month} 월간 Google Vision OCR 사용량`"
+          :title="`${ocrUsage.month} 월간 OCR 사용량`"
         >
           <span class="ocr-label">OCR</span>
           <span class="ocr-count">{{ ocrUsage.used }} / {{ ocrUsage.limit }}</span>
         </div>
       </div>
     </header>
-    <main>
+
+    <main class="main">
       <HomePage v-if="page === 'home'" @open="openSheet" @usage-updated="loadOcrUsage" />
       <ChordEditor
         v-else-if="page === 'correct' && currentSheet"
@@ -91,56 +96,113 @@ onMounted(loadOcrUsage)
         @edit="goCorrect"
       />
     </main>
+
+    <footer class="foot">
+      <a
+        class="credit"
+        :href="COFFEE_URL"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Uncle Bob"
+      >2026 Uncle Bob ☕</a>
+    </footer>
   </div>
 </template>
 
 <style>
 .app {
-  max-width: 920px;
+  max-width: 960px;
   margin: 0 auto;
-  padding: 1rem;
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-}
-.header-top {
+  padding: 0.75rem 1rem 2rem;
+  min-height: 100vh;
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
+  gap: 0.75rem;
+  padding: 0.75rem 0 1rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border, #e2e6ef);
 }
-header h1 {
-  margin: 0;
-  font-size: 1.8rem;
-  color: #1a1a2e;
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
 }
-.subtitle {
-  color: #666;
-  margin: 0.25rem 0 0;
-  font-size: 0.95rem;
+.brand:hover .name {
+  color: var(--primary, #2563eb);
 }
-.ocr-badge {
+.logo {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #2563eb, #0f766e);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  font-weight: 700;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+}
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+}
+.name {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--text, #1a1d26);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  transition: color 0.15s;
+}
+.tag {
+  font-size: 0.75rem;
+  color: var(--text-muted, #5c6578);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.ocr-badge {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  padding: 0.4rem 0.75rem;
+  padding: 0.35rem 0.65rem;
   border-radius: 10px;
   background: #f0f4f8;
   border: 1px solid #d0dbe6;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: #334;
-  line-height: 1.3;
+  line-height: 1.25;
 }
 .ocr-badge .ocr-label {
-  font-weight: 600;
-  font-size: 0.7rem;
-  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 0.65rem;
   letter-spacing: 0.04em;
   color: #667;
+  text-transform: uppercase;
 }
 .ocr-badge .ocr-count {
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: 700;
 }
 .ocr-badge.warn {
   background: #fff8e6;
@@ -151,5 +213,36 @@ header h1 {
   background: #fdecea;
   border-color: #f5c2c0;
   color: #b33;
+}
+
+.main {
+  flex: 1;
+  padding-top: 1rem;
+}
+
+.foot {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border, #e2e6ef);
+  display: flex;
+  justify-content: center;
+}
+
+.credit {
+  font-size: 0.85rem;
+  color: #7a8294;
+  text-decoration: none;
+  letter-spacing: 0.01em;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+.credit:hover {
+  color: #5c6578;
+}
+
+@media (max-width: 480px) {
+  .tag {
+    display: none;
+  }
 }
 </style>
