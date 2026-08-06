@@ -9,6 +9,8 @@ const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 const NOTE_IDX = Object.fromEntries(NOTES.map((n, i) => [n, i]))
 NOTE_IDX['Db']=1; NOTE_IDX['Eb']=3; NOTE_IDX['Gb']=6; NOTE_IDX['Ab']=8; NOTE_IDX['Bb']=10
 
+const lastSheetId = ref(null)
+
 function normalizeSemitones(n) {
   n = ((Number(n) || 0) % 12 + 12) % 12
   if (n > 6) n -= 12
@@ -79,18 +81,22 @@ watch(
   () => props.sheet,
   (s) => {
     if (!s) return
-    semitones.value = s.transpose_semitones || 0
+    const isNewSong = lastSheetId.value !== s.id
+    lastSheetId.value = s.id
+
     localVariants.value = Array.isArray(s.variants) ? [...s.variants] : []
-    // 최신 변형 또는 result_image
-    if (s.result_image) {
-      lastVariantUrl.value = s.result_image
-    } else if (localVariants.value.length) {
-      const sorted = [...localVariants.value].sort((a, b) =>
-        String(b.created_at || '').localeCompare(String(a.created_at || ''))
-      )
-      const withImg = sorted.find((v) => v.image)
-      if (withImg) lastVariantUrl.value = withImg.image
+
+    // 새로 진입한 곡이면 -> 원본(t0) 보여주고 0으로 리셋
+    if (isNewSong) {
+      const original = localVariants.value.find(v => v.transpose_semitones === 0)
+      lastVariantUrl.value = original?.image || s.result_image || ''
+      semitones.value = 0
+      message.value = ''
+      return
     }
+
+    // 같은 곡에서 업데이트(방금 조옮김해서 저장한 경우)면 -> watch에서 아무것도 덮지 않음
+    // renderAndSave()에서 이미 lastVariantUrl을 새 변형으로 세팅했기 때문
   },
   { immediate: true, deep: true }
 )
@@ -237,7 +243,7 @@ async function deleteVariant(v) {
   const data = await res.json()
   if (data.deleted === 'song') { emit('back'); return }
   localVariants.value = data.variants || localVariants.value.filter(x=>x.id!==v.id)
-  emit('updated', data)
+  emit('updated', data.song)
 }
 </script>
 

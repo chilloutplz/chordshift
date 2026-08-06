@@ -39,7 +39,7 @@ const placeChord = ref('')
 const customChord = ref('')
 const stageRef = ref(null)
 const drag = ref(null)
-const chordFontPx = ref(13)
+const chordFontPx = ref(15)
 const selectedRoot = ref(null)
 const dupCandidates = ref([])
 
@@ -257,6 +257,11 @@ watch(() => props.sheet, (s) => {
   lines.value = toLines(s.chords)
   semitones.value = s.transpose_semitones || 0
   ocrHasRun.value = !!(s.chords?.length || s.ocr_raw_text)
+  if (s.chord_font_size) {
+    chordFontPx.value = s.chord_font_size
+  } else if (s.chordFontSize) {
+    chordFontPx.value = s.chordFontSize
+  }
 }, { immediate: true })
 
 const displayLines = computed(() => {
@@ -560,17 +565,21 @@ async function saveLines() {
   saving.value = true
   try {
     let res
+    const payload = { 
+      chords: lines.value,
+      chord_font_size: chordFontPx.value // 이거 추가
+    }
     if (isTemp()) {
       res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chords: lines.value }),
+        body: JSON.stringify(payload),
       })
     } else {
       res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chords: lines.value }),
+        body: JSON.stringify(payload),
       })
     }
     if (!res.ok) throw new Error('저장 실패')
@@ -596,6 +605,7 @@ async function saveBase(mergeSongId = null, forceNew = false) {
         temp_id: sheetId(),
         title: props.sheet.title || '',
         chords: lines.value,
+        chord_font_size: chordFontPx.value,
         force_new: forceNew,
       }
       if (mergeSongId) body.merge_song_id = mergeSongId

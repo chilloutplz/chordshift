@@ -40,7 +40,7 @@ def _normalize_lines(chords) -> list:
     return [{'id': 'L0', 'y': 0.12, 'xStart': 0.08, 'xEnd': 0.92, 'height': 0.028, 'items': items}]
 
 
-def render_transposed_sheet(image_path: str, chords: list) -> ContentFile:
+def render_transposed_sheet(image_path: str, chords: list, font_size: int = None) -> ContentFile:
     img = Image.open(image_path).convert('RGB')
     w, h = img.size
     draw = ImageDraw.Draw(img)
@@ -58,8 +58,11 @@ def render_transposed_sheet(image_path: str, chords: list) -> ContentFile:
             x1 = min(0.98, x0 + 0.5)
 
         band_h = max(int(h * band_h_n), 14)
-        font_size = max(12, min(int(band_h * 0.85), int(h * 0.016) + 2))
-        font = _get_font(font_size)
+        if font_size is not None:
+            fs = max(11, min(int(font_size), 30))
+        else:
+            fs = max(12, min(int(band_h * 0.85), int(h * 0.016) + 2))
+        font = _get_font(fs)
 
         # 프론트와 동일 오프셋: top = y - h
         py0 = max(0, int((y - band_h_n) * h))
@@ -84,7 +87,7 @@ def render_transposed_sheet(image_path: str, chords: list) -> ContentFile:
                 bbox = draw.textbbox((0, 0), chord, font=font)
                 tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             except Exception:
-                tw, th = len(chord) * font_size // 2, font_size
+                tw, th = len(chord) * fs // 2, fs
 
             tx = int(cx * w - tw / 2)
             ty = py0 + max(0, (band_h - th) // 2)

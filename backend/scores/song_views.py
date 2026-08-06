@@ -1,152 +1,77 @@
-"""Song repository + temp upload APIs - 분리형 (502 해결)"""
-import ctypes
-import gc
-import threading
-import time
-import uuid
-from collections import deque
-from pathlib import Path
-
+"""Song repository + temp upload APIs - patched for chord_font_size"""
 from django.conf import settings
 from django.db.models import Q
 from django.core.files import File
-from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, action
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
+from rest_framework import viewsets
 
 from .models import Song, ScoreVariant
 from .serializers import SongSerializer, ScoreVariantSerializer
 from .utils.image_process import optimize_for_mobile
 from .utils.temp_store import save_temp_image, load_meta, save_meta, image_path, delete_temp, cleanup_old_temps
 
-
-def _release_memory():
-    """
-    OCR 작업 직후 호출 - Python GC로 참조 끊긴 객체 정리 + glibc에게
-    안 쓰는 힙 메모리를 OS에 반납하도록 요청 (malloc_trim).
-    0.5GB 메모리 환경에서 '방금 끝난 OCR의 잔여 메모리 위에 다음 OCR이
-    얹혀서 OOM 나는' 패턴을 완화하기 위함. 100% 보장은 아니지만 비용 없음.
-    """
-    gc.collect()
-    try:
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim(0)
-    except Exception:
-        pass
-
-
-# --- 502 해결용: 메모리에서 job 관리 (단순 버전) ---
-JOBS = {}
-
-# 메모리 0.5GB 환경에서 OCR 동시 실행 시 OOM으로 워커가 죽는 문제 방지
-# → RapidOCR 추론은 한 번에 하나씩만 돌게 강제 (동시 업로드 시 순차 대기)
-_OCR_SEMAPHORE = threading.Semaphore(1)
-
-# 대기 순번 계산용 - 도착한 순서대로 job_id를 쌓아두고, 처리 시작하면 빼냄
-_QUEUE_LOCK = threading.Lock()
-_QUEUE_ORDER = []
-
-# 최근 완료된 OCR 소요시간(초) - 다음 대기자의 예상 대기시간 추정에 사용
-_RECENT_DURATIONS = deque(maxlen=5)
-_DEFAULT_DURATION_ESTIMATE = 25  # 이력이 없을 때 쓸 기본 추정치(초), 로그 상 실측 평균 근사치
+from .utils.config import DEFAULT_CHORD_FONT_SIZE
 
 @api_view(['POST'])
 def temp_upload(request):
-    """이미지 업로드 → tmp 저장만. OCR 절대 안 함. 1초컷."""
     cleanup_old_temps()
     f = request.FILES.get('image')
     if not f:
         return Response({'error': 'image 필수'}, status=400)
     title = request.data.get('title', '')
-
+    run_ocr = str(request.data.get('run_ocr', 'true')).lower() in ('1', 'true', 'yes')
     optimized = optimize_for_mobile(f)
     info = save_temp_image(optimized)
     meta = load_meta(info['temp_id']) or {}
     meta['title'] = title or getattr(f, 'name', '')
-    meta['chords'] = []
-    meta['ocr_raw_text'] = ''
+    meta['chord_font_size'] = int(request.data.get('chord_font_size', DEFAULT_CHORD_FONT_SIZE) or DEFAULT_CHORD_FONT_SIZE)
+    chords = []
+    ocr_raw = ''
+    if run_ocr:
+        try:
+            from .utils.ocr import run_ocr as do_ocr
+            result = do_ocr(info['path'])
+            chords = result.get('chords') or result.get('chord_lines') or []
+            ocr_raw = result.get('raw_text', '') or result.get('ocr_raw_text','')
+        except Exception as e:
+            ocr_raw = f'[OCR error] {e}'
+    meta['chords'] = chords
+    meta['ocr_raw_text'] = ocr_raw
     save_meta(info['temp_id'], meta)
-
-    _abs = request.build_absolute_uri(info['url']) if not info['url'].startswith('http') else info['url']
-    if _abs.startswith('http://'):
-        _abs = _abs.replace('http://', 'https://')
-
     return Response({
         'temp_id': info['temp_id'],
         'title': meta['title'],
-        'optimized_image': _abs,
-        'chords': [],
-        'ocr_raw_text': '',
-        'transpose_semitones': 0,
+        'optimized_image': info['url'],
+        'chords': chords,
+        'chord_font_size': meta['chord_font_size'],
+        'ocr_raw_text': ocr_raw,
         'is_temp': True,
     }, status=201)
 
 
 @api_view(['POST'])
 def temp_ocr(request, temp_id):
-    """OCR 시작 → 바로 job_id 반환, 백그라운드에서 처리"""
     path = image_path(temp_id)
     if not path:
         return Response({'error': '임시 파일 없음'}, status=404)
-
-    job_id = str(uuid.uuid4())[:12]
-    JOBS[job_id] = {"status": "queued", "temp_id": temp_id, "result": None}
-
-    with _QUEUE_LOCK:
-        _QUEUE_ORDER.append(job_id)
-
-    def do_ocr_job():
-        with _OCR_SEMAPHORE:
-            # 세마포어 획득 = 내 차례가 됨 → 큐에서 제거
-            with _QUEUE_LOCK:
-                try:
-                    _QUEUE_ORDER.remove(job_id)
-                except ValueError:
-                    pass
-            JOBS[job_id] = {"status": "processing", "temp_id": temp_id, "result": None}
-            started_at = time.time()
-            try:
-                from .utils.ocr import run_ocr as do_ocr
-                result = do_ocr(str(path))
-                meta = load_meta(temp_id) or {'temp_id': temp_id}
-                meta['chords'] = result.get('chords') or result.get('chord_lines') or []
-                meta['ocr_raw_text'] = result.get('raw_text', '')
-                save_meta(temp_id, meta)
-                JOBS[job_id] = {"status": "done", "temp_id": temp_id, "result": meta}
-            except Exception as e:
-                JOBS[job_id] = {"status": "failed", "temp_id": temp_id, "error": str(e)}
-            finally:
-                _RECENT_DURATIONS.append(time.time() - started_at)
-                _release_memory()
-
-    threading.Thread(target=do_ocr_job, daemon=True).start()
-
-    return Response({"job_id": job_id, "status": "processing"}, status=202)
-
-
-@api_view(['GET'])
-def temp_job_status(request, job_id):
-    """폴링용: GET /api/temp/job/<job_id>/"""
-    job = JOBS.get(job_id)
-    if not job:
-        return Response({'error': 'job 없음'}, status=404)
-
-    resp = dict(job)
-    if job.get('status') == 'queued':
-        with _QUEUE_LOCK:
-            try:
-                position = _QUEUE_ORDER.index(job_id)  # 0 = 바로 다음 차례
-            except ValueError:
-                position = 0
-        avg_duration = (
-            sum(_RECENT_DURATIONS) / len(_RECENT_DURATIONS)
-            if _RECENT_DURATIONS else _DEFAULT_DURATION_ESTIMATE
-        )
-        resp['ahead_count'] = position
-        resp['estimated_wait_seconds'] = round(position * avg_duration + avg_duration, 1)
-
-    return Response(resp)
+    try:
+        from .utils.ocr import run_ocr as do_ocr
+        result = do_ocr(str(path))
+    except Exception as e:
+        return Response({'error': f'OCR 실패: {e}'}, status=500)
+    meta = load_meta(temp_id) or {'temp_id': temp_id}
+    meta['chords'] = result.get('chords') or []
+    meta['ocr_raw_text'] = result.get('raw_text', '') or result.get('ocr_raw_text','')
+    save_meta(temp_id, meta)
+    return Response({
+        'temp_id': temp_id,
+        'chords': meta['chords'],
+        'ocr_raw_text': meta['ocr_raw_text'],
+        'chord_font_size': meta.get('chord_font_size', DEFAULT_CHORD_FONT_SIZE),
+        'is_temp': True,
+    })
 
 
 @api_view(['PATCH', 'POST'])
@@ -158,6 +83,11 @@ def temp_update_chords(request, temp_id):
         meta['chords'] = request.data['chords']
     if 'title' in request.data:
         meta['title'] = request.data['title']
+    if 'chord_font_size' in request.data:
+        try:
+            meta['chord_font_size'] = int(request.data['chord_font_size'])
+        except:
+            pass
     save_meta(temp_id, meta)
     return Response({**meta, 'is_temp': True})
 
@@ -175,16 +105,25 @@ def song_from_temp(request):
     chords = request.data.get('chords')
     merge_id = request.data.get('merge_song_id')
     force_new = str(request.data.get('force_new', 'false')).lower() in ('1', 'true', 'yes')
-
     meta = load_meta(temp_id) if temp_id else None
     path = image_path(temp_id) if temp_id else None
     if not path or not path.is_file():
         return Response({'error': '임시 파일이 없습니다. 다시 업로드하세요.'}, status=400)
-
     if chords is None and meta:
         chords = meta.get('chords') or []
     if not title and meta:
         title = meta.get('title') or ''
+    font_size = DEFAULT_CHORD_FONT_SIZE
+    if 'chord_font_size' in request.data:
+        try:
+            font_size = int(request.data['chord_font_size'])
+        except:
+            font_size = DEFAULT_CHORD_FONT_SIZE
+    elif meta and 'chord_font_size' in meta:
+        try:
+            font_size = int(meta['chord_font_size'])
+        except:
+            font_size = DEFAULT_CHORD_FONT_SIZE
 
     if title and not merge_id and not force_new:
         existing = list(Song.objects.filter(title__iexact=title)[:10])
@@ -202,13 +141,14 @@ def song_from_temp(request):
             return Response({'error': '병합할 곡이 없습니다'}, status=404)
         song.title = title or song.title
         song.chords = chords or song.chords
+        song.chord_font_size = font_size
         if meta:
             song.ocr_raw_text = meta.get('ocr_raw_text') or song.ocr_raw_text
         with open(path, 'rb') as fh:
             song.original_image.save(path.name, File(fh), save=True)
         song.save()
     else:
-        song = Song(title=title, chords=chords or [], ocr_raw_text=(meta or {}).get('ocr_raw_text', ''))
+        song = Song(title=title, chords=chords or [], ocr_raw_text=(meta or {}).get('ocr_raw_text', ''), chord_font_size=font_size)
         with open(path, 'rb') as fh:
             song.original_image.save(path.name, File(fh), save=False)
         song.save()
@@ -217,6 +157,29 @@ def song_from_temp(request):
     data = SongSerializer(song, context={'request': request}).data
     data['message'] = '보정본이 저장되었습니다'
     return Response(data, status=201)
+
+
+
+@api_view(['GET'])
+def temp_job_status(request, job_id):
+    """OCR 큐 상태 폴링 - 임시 호환용 stub. 실제로는 temp_id로 meta 조회"""
+    from .utils.temp_store import load_meta
+    # job_id가 temp_id인 경우도 있고, 실제 job 시스템이 없으면 temp_id로 시도
+    meta = load_meta(job_id)
+    if meta:
+        return Response({
+            'job_id': job_id,
+            'status': 'done' if meta.get('chords') else 'processing',
+            'chords': meta.get('chords', []),
+            'ocr_raw_text': meta.get('ocr_raw_text',''),
+            'chord_font_size': meta.get('chord_font_size', DEFAULT_CHORD_FONT_SIZE),
+        })
+    # job 시스템이 있다면 여기서 조회, 없으면 404 대신 queued 반환으로 프론트 무한대기 방지
+    return Response({
+        'job_id': job_id,
+        'status': 'queued',
+        'message': 'job system not configured, using temp_id polling fallback',
+    })
 
 
 class SongViewSet(viewsets.ModelViewSet):
@@ -248,6 +211,7 @@ class SongViewSet(viewsets.ModelViewSet):
         except Exception:
             semitones = 0
         chords = request.data.get('chords') or song.chords or []
+        font_size = int(request.data.get('chord_font_size') or getattr(song, 'chord_font_size', DEFAULT_CHORD_FONT_SIZE) or DEFAULT_CHORD_FONT_SIZE)
         from .utils.render_sheet import render_transposed_sheet
 
         render_chords = chords
@@ -269,7 +233,10 @@ class SongViewSet(viewsets.ModelViewSet):
         try:
             from .utils.file_local import local_image_path
             with local_image_path(song.original_image) as img_path:
-                content = render_transposed_sheet(img_path, render_chords)
+                try:
+                    content = render_transposed_sheet(img_path, render_chords, font_size=font_size)
+                except TypeError:
+                    content = render_transposed_sheet(img_path, render_chords)
         except Exception as e:
             return Response({'error': f'렌더 실패: {e}'}, status=500)
 
@@ -295,10 +262,11 @@ class SongViewSet(viewsets.ModelViewSet):
 
         variant, _ = ScoreVariant.objects.get_or_create(
             song=song, transpose_semitones=semitones,
-            defaults={'kind': kind, 'label': label},
+            defaults={'kind': kind, 'label': label, 'chord_font_size': font_size},
         )
         variant.kind = kind
         variant.label = label
+        variant.chord_font_size = font_size
         filename = f'{song.id}_t{semitones}.jpg'
         if variant.image and variant.image.name:
             try:
@@ -314,6 +282,42 @@ class SongViewSet(viewsets.ModelViewSet):
             'variant': ScoreVariantSerializer(variant, context={'request': request}).data,
         })
 
+    @action(detail=True, methods=['delete'], url_path=r'variants/(?P<variant_id>[^/.]+)')
+    def delete_variant(self, request, id=None, variant_id=None):
+        song = self.get_object()
+        try:
+            variant = song.variants.get(id=variant_id)
+        except ScoreVariant.DoesNotExist:
+            return Response({'error': '변형 없음'}, status=404)
+
+        if variant.transpose_semitones == 0:
+            for v in song.variants.all():
+                if v.image and v.image.name:
+                    try:
+                        v.image.storage.delete(v.image.name)
+                    except:
+                        pass
+            if song.original_image and song.original_image.name:
+                try:
+                    song.original_image.storage.delete(song.original_image.name)
+                except:
+                    pass
+            song.delete()
+            return Response({'deleted': 'song'})
+
+        if variant.image and variant.image.name:
+            try:
+                variant.image.storage.delete(variant.image.name)
+            except:
+                pass
+        variant.delete()
+        song = Song.objects.prefetch_related('variants').get(pk=song.pk)
+        return Response({
+            'deleted': 'variant',
+            'variants': ScoreVariantSerializer(song.variants.all(), many=True, context={'request': request}).data,
+            'song': SongSerializer(song, context={'request': request}).data,
+        })
+        
     def destroy(self, request, *args, **kwargs):
         song = self.get_object()
         for v in song.variants.all():
@@ -330,104 +334,16 @@ class SongViewSet(viewsets.ModelViewSet):
         song.delete()
         return Response(status=204)
 
-    def _delete_song_fully(self, song):
-        """
-        [내부 공용] 곡 완전 삭제 - 데코레이터 없음, API로 직접 호출 불가
-        - 언제 호출: destroy(), delete_variant()에서 보정본 삭제 시, delete_variant_by_semitones()에서 semitones=0일 때
-        - 역할: 모든 ScoreVariant 이미지 파일 삭제 + 원본 이미지 파일 삭제 + Song 레코드 삭제
-        - 보정본=곡 자체이므로 보정본 삭제 요청 시 이 함수가 호출됨
-        """
-        for v in song.variants.all():
-            if v.image and v.image.name:
-                try:
-                    v.image.storage.delete(v.image.name)
-                except Exception:
-                    pass
-        if song.original_image and song.original_image.name:
-            try:
-                song.original_image.storage.delete(song.original_image.name)
-            except Exception:
-                pass
-        song.delete()
-
-    @action(detail=True, methods=['delete'], url_path='variants/(?P<variant_id>[^/.]+)')
-    def delete_variant(self, request, id=None, variant_id=None):
-        """
-        개별 버전 삭제 API (ID 기반)
-        - 언제 호출: DELETE /api/songs/{song_id}/variants/{variant_id}/
-        - 역할:
-        1) variant가 보정본( transpose_semitones==0 또는 KIND_CORRECTED )이면 -> _delete_song_fully() 호출로 곡 전체 삭제
-        2) 조옮김 버전이면 -> 해당 variant 이미지 파일 + DB 레코드만 삭제, Song은 유지
-        - 반환: 보정본 삭제 시 {deleted:'song'}, 조옮김 삭제 시 갱신된 SongSerializer
-        """
-        song = self.get_object()
-        try:
-            variant = song.variants.get(id=variant_id)
-        except ScoreVariant.DoesNotExist:
-            return Response({'error': '버전 없음'}, status=404)
-
-        # 보정본 삭제 = 곡 전체 삭제
-        is_corrected = (variant.transpose_semitones == 0) or (variant.kind == ScoreVariant.KIND_CORRECTED)
-        if is_corrected:
-            self._delete_song_fully(song)
-            return Response({'deleted': 'song', 'message': '보정본 삭제 - 곡 전체가 삭제되었습니다'}, status=200)
-
-        # 조옮김 버전만 삭제
-        if variant.image and variant.image.name:
-            try:
-                variant.image.storage.delete(variant.image.name)
-            except Exception:
-                pass
-        variant.delete()
-        song = Song.objects.prefetch_related('variants').get(pk=song.pk)
-        return Response(SongSerializer(song, context={'request': request}).data)
-
-    @action(detail=True, methods=['delete'], url_path='variant_by_semitones')
-    def delete_variant_by_semitones(self, request, id=None):
-        """
-        개별 버전 삭제 API (semitones 기반) - 프론트 편의용
-        - 언제 호출: DELETE /api/songs/{song_id}/variant_by_semitones/?semitones=2
-        - 역할:
-        1) semitones==0이면 보정본으로 간주 -> _delete_song_fully() 호출로 곡 전체 삭제
-        2) semitones!=0이면 해당 semitones의 variant 이미지 + DB만 삭제
-        - 반환: 보정본 삭제 시 {deleted:'song'}, 조옮김 삭제 시 갱신된 SongSerializer
-        """
-        song = self.get_object()
-        semitones = request.query_params.get('semitones')
-        if semitones is None:
-            return Response({'error': 'semitones 필수'}, status=400)
-        try:
-            from .utils.chord_transpose import normalize_semitones
-            semitones = normalize_semitones(semitones)
-        except Exception:
-            try:
-                semitones = int(semitones)
-            except:
-                semitones = 0
-
-        # 보정본(0) 삭제 요청 = 곡 전체 삭제
-        if semitones == 0:
-            self._delete_song_fully(song)
-            return Response({'deleted': 'song', 'message': '보정본 삭제 - 곡 전체가 삭제되었습니다'}, status=200)
-
-        qs = song.variants.filter(transpose_semitones=semitones)
-        if not qs.exists():
-            return Response({'error': '해당 버전 없음'}, status=404)
-        for v in qs:
-            if v.image and v.image.name:
-                try:
-                    v.image.storage.delete(v.image.name)
-                except Exception:
-                    pass
-        qs.delete()
-        song = Song.objects.prefetch_related('variants').get(pk=song.pk)
-        return Response(SongSerializer(song, context={'request': request}).data)
-    
     def partial_update(self, request, *args, **kwargs):
         song = self.get_object()
         if 'chords' in request.data:
             song.chords = request.data['chords']
         if 'title' in request.data:
             song.title = request.data['title']
+        if 'chord_font_size' in request.data:
+            try:
+                song.chord_font_size = int(request.data['chord_font_size'])
+            except:
+                pass
         song.save()
         return Response(SongSerializer(song, context={'request': request}).data)

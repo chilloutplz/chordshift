@@ -14,6 +14,7 @@ class Song(models.Model):
     title = models.CharField(max_length=200, blank=True, default='', db_index=True)
     original_image = models.ImageField(upload_to='songs/original/', blank=True, null=True)
     chords = models.JSONField(default=list, blank=True)
+    chord_font_size = models.IntegerField(default=13)
     ocr_raw_text = models.TextField(blank=True, default='')
     original_key = models.CharField(max_length=10, blank=True, default='')
     share_token = models.CharField(max_length=32, unique=True, blank=True, null=True)
@@ -46,6 +47,7 @@ class ScoreVariant(models.Model):
     kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_CORRECTED)
     transpose_semitones = models.IntegerField(default=0)
     label = models.CharField(max_length=80, blank=True, default='')
+    chord_font_size = models.IntegerField(default=13)
     image = models.ImageField(upload_to='songs/variants/', blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
 
