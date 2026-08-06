@@ -651,19 +651,18 @@ async function saveBase(mergeSongId = null, forceNew = false) {
 
 async function confirmSheet() {
   confirming.value = true
-  message.value = '확정 처리 중…'
+  message.value = ''
   try {
     await saveLines()
+    let song = { ...props.sheet, chords: lines.value, chord_font_size: chordFontPx.value }
 
-    let song = { ...props.sheet }
-
-    // 임시 업로드면 확정과 함께 DB 등록 (보정본 저장)
     if (isTemp()) {
       const body = {
         temp_id: sheetId(),
         title: props.sheet.title || '',
         chords: lines.value,
-        force_new: true,
+        chord_font_size: chordFontPx.value,
+        force_new: false,
       }
       let res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
@@ -672,7 +671,6 @@ async function confirmSheet() {
       })
       let data = await res.json().catch(() => ({}))
       if (res.status === 409 && data.error === 'duplicate_title') {
-        // 확정 흐름에서는 새 곡으로 강제 저장
         body.force_new = true
         res = await apiFetch('/api/songs/from-temp/', {
           method: 'POST',
@@ -682,34 +680,41 @@ async function confirmSheet() {
         data = await res.json().catch(() => ({}))
       }
       if (!res.ok) {
-        // Song API 미적용 환경 → 구 API 시도하지 않고 안내
         throw new Error(data.error || data.message || '보정본 저장 실패. migrate / 서버 재시작을 확인하세요.')
       }
-      song = { ...data, is_temp: false }
+      // 서버 응답의 이미지 URL 유지 (temp URL 덮어쓰지 않음)
+      song = {
+        ...song,
+        ...data,
+        is_temp: false,
+        optimized_image: data.optimized_image || data.image_url || song.optimized_image,
+        chords: data.chords ?? lines.value,
+      }
+      emit('updated', song)
+    } else {
+      const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chords: lines.value,
+          chord_font_size: chordFontPx.value,
+          title: props.sheet.title || '',
+        }),
+      })
+      if (!res.ok) throw new Error('저장 실패')
+      const data = await res.json()
+      song = {
+        ...song,
+        ...data,
+        optimized_image: data.optimized_image || song.optimized_image,
+        chords: data.chords ?? lines.value,
+      }
       emit('updated', song)
     }
 
-    const songId = song.id
-    if (!songId) throw new Error('곡 ID가 없습니다')
+    if (!song.id) throw new Error('곡 ID가 없습니다')
 
-    // 수정본 이미지 렌더 (Song API)
-    let res = await apiFetch(`/api/songs/${songId}/render_variant/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        semitones: 0,
-        chords: lines.value,
-        label: keyLabelFromLines(lines.value, 0),
-      }),
-    })
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || '확정 실패')
-    }
-    const data = await res.json()
-    song = data.song || data
-    emit('updated', song)
+    // 온디맨드 렌더: 확정 시 variant 이미지 저장하지 않음. 조옮김 화면에서 실시간 생성.
     message.value = '확정됨 · 조옮김 단계로 이동'
     emit('next', song)
   } catch (e) {
@@ -719,17 +724,25 @@ async function confirmSheet() {
   }
 }
 
-
 const imageUrl = computed(() => {
-  let u = props.sheet.optimized_image || props.sheet.image_url || ''
+  let u =
+    props.sheet.optimized_image ||
+    props.sheet.image_url ||
+    props.sheet.original_image ||
+    ''
   if (!u) return ''
+  if (typeof u === 'object' && u.url) u = u.url
+  u = String(u)
+  // data URL 은 그대로
+  if (u.startsWith('data:')) return u
   if (u.startsWith('/')) u = `${API_BASE}${u}`
   if (u.includes('127.0.0.1') || u.includes('localhost')) {
     u = u.replace('https://', 'http://')
   } else if (u.startsWith('http://') && API_BASE.startsWith('https://')) {
     u = u.replace('http://', 'https://')
   }
-  return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
+  const bust = props.sheet.updated_at || Date.now()
+  return u + (u.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(bust)
 })
 const resultUrl = computed(() => {
   let u = props.sheet.result_image || ''
@@ -783,7 +796,7 @@ const ocrStatusText = computed(() => {
       <span class="size-val">{{ chordFontPx }}px</span>
       <button type="button" @click="bumpFont(1)">A+</button>
     </div>
-    <div class="stage-frame" v-if="sheet.optimized_image">
+    <div class="stage-frame" v-if="imageUrl">
     <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" @click="onStageClick">
       <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
       <div v-if="ocrLoading" class="ocr-scan-overlay">

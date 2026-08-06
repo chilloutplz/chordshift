@@ -192,7 +192,12 @@ def song_from_temp(request):
         song.save()
 
     delete_temp(temp_id)
+    song.refresh_from_db()
     data = SongSerializer(song, context={'request': request}).data
+    # 프론트가 temp URL 대신 쓸 수 있게 명시
+    if data.get('optimized_image') and not data.get('image_url'):
+        data['image_url'] = data['optimized_image']
+    data['is_temp'] = False
     data['message'] = '보정본이 저장되었습니다'
     return Response(data, status=201)
 
@@ -240,6 +245,12 @@ class SongViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def render_variant(self, request, id=None):
+        """
+        조옮김 결과 실시간 렌더 (이미지 파일 저장 안 함).
+        원본 + chords 만 사용하고 JPEG 바이트를 base64 로 반환.
+        """
+        import base64
+        import re
         song = self.get_object()
         if not song.original_image:
             return Response({'error': '원본 이미지 없음'}, status=400)
@@ -249,7 +260,11 @@ class SongViewSet(viewsets.ModelViewSet):
         except Exception:
             semitones = 0
         chords = request.data.get('chords') or song.chords or []
-        font_size = int(request.data.get('chord_font_size') or getattr(song, 'chord_font_size', DEFAULT_CHORD_FONT_SIZE) or DEFAULT_CHORD_FONT_SIZE)
+        font_size = int(
+            request.data.get('chord_font_size')
+            or getattr(song, 'chord_font_size', DEFAULT_CHORD_FONT_SIZE)
+            or DEFAULT_CHORD_FONT_SIZE
+        )
         from .utils.render_sheet import render_transposed_sheet
 
         render_chords = chords
@@ -278,7 +293,6 @@ class SongViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': f'렌더 실패: {e}'}, status=500)
 
-        kind = ScoreVariant.KIND_CORRECTED if semitones == 0 else ScoreVariant.KIND_TRANSPOSED
         label = (request.data.get('label') or '').strip()
         if not label:
             first = 'C'
@@ -293,31 +307,27 @@ class SongViewSet(viewsets.ModelViewSet):
                 shown = (render_chords[0]['items'][0] or {}).get('chord') or first
             else:
                 shown = transpose_chord_str(first, semitones) if semitones else first
-            import re
             m = re.match(r'([A-Ga-g][#b]?)', str(shown).strip())
             root = (m.group(1)[0].upper() + m.group(1)[1:]) if m else 'C'
             label = f'{root}코드'
 
-        variant, _ = ScoreVariant.objects.get_or_create(
-            song=song, transpose_semitones=semitones,
-            defaults={'kind': kind, 'label': label, 'chord_font_size': font_size},
-        )
-        variant.kind = kind
-        variant.label = label
-        variant.chord_font_size = font_size
-        filename = f'{song.id}_t{semitones}.jpg'
-        if variant.image and variant.image.name:
-            try:
-                variant.image.delete(save=False)
-            except Exception:
-                pass
-        variant.image.save(filename, content, save=True)
+        raw = content.read() if hasattr(content, 'read') else bytes(content)
+        b64 = base64.b64encode(raw).decode('ascii')
         song.save(update_fields=['updated_at'])
-        song = Song.objects.prefetch_related('variants').get(pk=song.pk)
-        variant.refresh_from_db()
+
         return Response({
-            'song': SongSerializer(song, context={'request': request}).data,
-            'variant': ScoreVariantSerializer(variant, context={'request': request}).data,
+            'semitones': semitones,
+            'label': label,
+            'image_base64': b64,
+            'content_type': 'image/jpeg',
+            # 하위 호환: 예전 프론트가 variant.image 를 기대해도 data URL 로 동작
+            'variant': {
+                'id': None,
+                'kind': 'corrected' if semitones == 0 else 'transposed',
+                'transpose_semitones': semitones,
+                'label': label,
+                'image': f'data:image/jpeg;base64,{b64}',
+            },
         })
 
     @action(detail=True, methods=['delete'], url_path=r'variants/(?P<variant_id>[^/.]+)')

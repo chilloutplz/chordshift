@@ -7,24 +7,33 @@ class ScoreVariantSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ScoreVariant
-        fields = ['id', 'kind', 'transpose_semitones', 'label', 'image', 'created_at']
+        fields = ['id', 'kind', 'transpose_semitones', 'label', 'image', 'created_at', 'chord_font_size']
 
     def get_image(self, obj):
         if not obj.image:
             return None
-        from django.conf import settings
-        req = self.context.get('request')
-        name = getattr(obj.image, 'name', None) or ''
-        if getattr(settings, 'USE_R2', False) and name:
-            url = f'/api/files/{name}'
-            return req.build_absolute_uri(url) if req else url
-        try:
-            url = obj.image.url
-        except Exception:
-            return None
-        if req and url and url.startswith('/'):
-            return req.build_absolute_uri(url)
-        return url
+        return _file_url(obj.image, self.context.get('request'))
+
+
+def _file_url(field_file, request=None):
+    """브라우저/프록시에서 쓰기 쉬운 상대 경로 우선."""
+    if not field_file:
+        return None
+    from django.conf import settings
+    name = getattr(field_file, 'name', None) or ''
+    if getattr(settings, 'USE_R2', False) and name:
+        return f'/api/files/{name}'
+    try:
+        url = field_file.url
+    except Exception:
+        return None
+    if not url:
+        return None
+    # 절대 URL이면 path만 사용 (호스트 불일치 방지)
+    if url.startswith('http://') or url.startswith('https://'):
+        from urllib.parse import urlparse
+        return urlparse(url).path or url
+    return url
 
 
 class SongSerializer(serializers.ModelSerializer):
@@ -37,7 +46,7 @@ class SongSerializer(serializers.ModelSerializer):
         model = Song
         fields = [
             'id', 'title', 'original_image', 'optimized_image', 'result_image',
-            'chords', 'ocr_raw_text', 'original_key', 'share_token',
+            'chords', 'chord_font_size', 'ocr_raw_text', 'original_key', 'share_token',
             'transpose_semitones', 'variants', 'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -45,27 +54,12 @@ class SongSerializer(serializers.ModelSerializer):
             'original_image', 'optimized_image', 'result_image', 'variants',
         ]
 
-    def _abs(self, field_file):
-        if not field_file:
-            return None
-        from django.conf import settings
-        req = self.context.get('request')
-        name = getattr(field_file, 'name', None) or ''
-        if getattr(settings, 'USE_R2', False) and name:
-            url = f'/api/files/{name}'
-            return req.build_absolute_uri(url) if req else url
-        try:
-            url = field_file.url
-        except Exception:
-            return None
-        if req and url and url.startswith('/'):
-            return req.build_absolute_uri(url)
-        return url
-
     def get_optimized_image(self, obj):
-        return self._abs(obj.original_image)
+        return _file_url(obj.original_image, self.context.get('request'))
 
     def get_result_image(self, obj):
+        # 온디맨드 렌더 전환 후 variant 이미지에 의존하지 않음
+        # 하위 호환: 예전에 저장된 variant 이미지가 있으면 반환
         variants = list(obj.variants.all())
         if not variants:
             return None
@@ -76,7 +70,7 @@ class SongSerializer(serializers.ModelSerializer):
         )
         for v in variants_sorted:
             if v.image:
-                return self._abs(v.image)
+                return _file_url(v.image, self.context.get('request'))
         return None
 
     def get_transpose_semitones(self, obj):

@@ -55,11 +55,6 @@ const folders = computed(() => {
   }))
 })
 
-function variantCount(s) {
-  if (Array.isArray(s.variants)) return s.variants.length
-  return 0
-}
-
 async function loadAll() {
   loading.value = true
   error.value = ''
@@ -211,7 +206,6 @@ onMounted(() => {
             <li v-for="s in f.songs" :key="s.id">
               <button type="button" class="song-item" @click="emit('open', s)">
                 <span class="title">{{ s.title || '(제목 없음)' }}</span>
-                <span class="meta" v-if="variantCount(s)">변형 {{ variantCount(s) }}</span>
               </button>
             </li>
           </ul>

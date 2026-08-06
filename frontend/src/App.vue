@@ -26,8 +26,10 @@ async function loadOcrUsage() {
 
 function openSheet(sheet) {
   currentSheet.value = sheet
-  page.value =
-    sheet.result_image || (sheet.variants && sheet.variants.length) ? 'transpose' : 'correct'
+  // 새 업로드(임시) → 보정 화면 / 목록에서 고른 저장곡 → 조옮김 화면
+  // 조옮김에서 「보정으로」링크 → 보정 화면 (goCorrect)
+  const isTemp = !!(sheet.is_temp || sheet.temp_id)
+  page.value = isTemp ? 'correct' : 'transpose'
 }
 
 function onUpdated(sheet) {

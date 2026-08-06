@@ -1,18 +1,22 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { API_BASE, apiFetch } from '@/api/api.js'
+import { apiFetch } from '@/api/api.js'
 
 const props = defineProps({ sheet: { type: Object, required: true } })
 const emit = defineEmits(['updated', 'back', 'edit'])
 
-const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 const NOTE_IDX = Object.fromEntries(NOTES.map((n, i) => [n, i]))
-NOTE_IDX['Db']=1; NOTE_IDX['Eb']=3; NOTE_IDX['Gb']=6; NOTE_IDX['Ab']=8; NOTE_IDX['Bb']=10
+NOTE_IDX['Db'] = 1
+NOTE_IDX['Eb'] = 3
+NOTE_IDX['Gb'] = 6
+NOTE_IDX['Ab'] = 8
+NOTE_IDX['Bb'] = 10
 
 const lastSheetId = ref(null)
 
 function normalizeSemitones(n) {
-  n = ((Number(n) || 0) % 12 + 12) % 12
+  n = (((Number(n) || 0) % 12) + 12) % 12
   if (n > 6) n -= 12
   return n
 }
@@ -20,7 +24,9 @@ function normalizeSemitones(n) {
 function transposeChordName(name, semitones) {
   if (!name || !semitones) return name
   const s = String(name).trim()
-  if (s.includes('/')) return s.split('/').map((p) => transposeChordName(p, semitones)).join('/')
+  if (s.includes('/')) {
+    return s.split('/').map((p) => transposeChordName(p, semitones)).join('/')
+  }
   const m = s.match(/^([A-Ga-g])([#b]?)(.*)$/)
   if (!m) return s
   const root = m[1].toUpperCase() + (m[2] || '')
@@ -43,78 +49,37 @@ function rootOnly(name) {
   return m ? m[1].toUpperCase().replace('B#', 'C').replace('E#', 'F') : 'C'
 }
 
-/** 시작 코드 기준 라벨: "G코드", "A코드" … */
 function keyLabel(chords, semitones) {
   const base = firstChordName(chords)
   const transposed = transposeChordName(base, semitones || 0)
-  const root = rootOnly(transposed)
-  return `${root}코드`
-}
-
-
-function resolveImageUrl(u) {
-  if (!u) return ''
-  let url = String(u)
-  if (url.startsWith('/')) url = `${API_BASE}${url}`
-  if (url.includes('127.0.0.1') || url.includes('localhost')) {
-    url = url.replace('https://', 'http://')
-  } else if (url.startsWith('http://') && API_BASE.startsWith('https://')) {
-    url = url.replace('http://', 'https://')
-  }
-  return url
-}
-function withCache(url) {
-  if (!url) return ''
-  const base = resolveImageUrl(url)
-  const sep = base.includes('?') ? '&' : '?'
-  return base + sep + 't=' + Date.now()
+  return `${rootOnly(transposed)}코드`
 }
 
 const semitones = ref(0)
 const rendering = ref(false)
 const imageLoading = ref(false)
 const message = ref('')
-const lastVariantUrl = ref('')
-const localVariants = ref([])
+/** data: URL 또는 빈 문자열 — 서버에 저장하지 않음 */
+const previewUrl = ref('')
+const currentLabel = ref('')
 
 watch(
   () => props.sheet,
   (s) => {
     if (!s) return
-    const isNewSong = lastSheetId.value !== s.id
+    const isNew = lastSheetId.value !== s.id
     lastSheetId.value = s.id
-
-    localVariants.value = Array.isArray(s.variants) ? [...s.variants] : []
-
-    // 새로 진입한 곡이면 -> 원본(t0) 보여주고 0으로 리셋
-    if (isNewSong) {
-      const original = localVariants.value.find(v => v.transpose_semitones === 0)
-      lastVariantUrl.value = original?.image || s.result_image || ''
+    if (isNew) {
       semitones.value = 0
+      previewUrl.value = ''
       message.value = ''
-      return
+      currentLabel.value = keyLabel(s.chords || [], 0)
+      // 진입 시 원본(0) 자동 렌더
+      renderPreview()
     }
-
-    // 같은 곡에서 업데이트(방금 조옮김해서 저장한 경우)면 -> watch에서 아무것도 덮지 않음
-    // renderAndSave()에서 이미 lastVariantUrl을 새 변형으로 세팅했기 때문
   },
-  { immediate: true, deep: true }
+  { immediate: true },
 )
-
-const resultUrl = computed(() => withCache(lastVariantUrl.value || props.sheet.result_image || ''))
-
-// 이미지 URL 바뀔 때마다 로딩 시작
-watch(resultUrl, (url) => {
-  if (url) imageLoading.value = true
-}, { immediate: true })
-
-function onImageLoad() {
-  imageLoading.value = false
-}
-function onImageError() {
-  imageLoading.value = false
-  message.value = '이미지를 불러오지 못했습니다'
-}
 
 const previewChords = computed(() => {
   const delta = semitones.value || 0
@@ -122,7 +87,7 @@ const previewChords = computed(() => {
   if (!lines.length) return []
   if (lines[0]?.items) {
     return lines.flatMap((L) =>
-      (L.items || []).map((it) => transposeChordName(it.chord, delta))
+      (L.items || []).map((it) => transposeChordName(it.chord, delta)),
     )
   }
   return lines.map((c) => transposeChordName(typeof c === 'string' ? c : c.chord, delta))
@@ -130,80 +95,76 @@ const previewChords = computed(() => {
 
 function doTranspose(delta) {
   semitones.value = normalizeSemitones(semitones.value + delta)
-  message.value = `조옮김 ${semitones.value > 0 ? '+' : ''}${semitones.value} (미리보기) · 아래 버튼으로 결과 생성`
+  currentLabel.value = keyLabel(props.sheet.chords || [], semitones.value)
+  message.value = ''
+  renderPreview()
 }
 
-async function renderAndSave() {
+async function renderPreview() {
+  const id = props.sheet.id
+  if (!id) {
+    message.value = '곡 ID 없음'
+    return
+  }
   rendering.value = true
-  message.value = '결과 악보 생성 중…'
+  imageLoading.value = true
+  message.value = '악보 생성 중…'
   try {
-    const id = props.sheet.id
-    if (!id) throw new Error('곡 ID 없음')
-
-    let res = await apiFetch(`/api/songs/${id}/render_variant/`, {
+    const res = await apiFetch(`/api/songs/${id}/render_variant/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         semitones: semitones.value,
         chords: props.sheet.chords || [],
         label: keyLabel(props.sheet.chords || [], semitones.value),
+        chord_font_size: props.sheet.chord_font_size,
       }),
     })
-
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || err.detail || '저장 실패')
+      throw new Error(err.error || err.detail || '생성 실패')
     }
-
     const data = await res.json()
-    const variant = data.variant
-    const song = data.song || data
-
-    if (variant?.image) {
-      lastVariantUrl.value = variant.image
-    } else if (song?.result_image) {
-      lastVariantUrl.value = song.result_image
-    }
-
-    if (Array.isArray(song?.variants)) {
-      localVariants.value = song.variants
-    } else if (variant) {
-      const rest = localVariants.value.filter(
-        (v) => v.transpose_semitones !== variant.transpose_semitones
-      )
-      localVariants.value = [variant, ...rest]
-    }
-
-    emit('updated', song)
-    message.value = `결과 저장됨 (${variant?.label || keyLabel(props.sheet.chords || [], semitones.value)})`
+    const url =
+      data.variant?.image ||
+      (data.image_base64 ? `data:image/jpeg;base64,${data.image_base64}` : '')
+    if (!url) throw new Error('이미지 데이터 없음')
+    previewUrl.value = url
+    currentLabel.value = data.label || keyLabel(props.sheet.chords || [], semitones.value)
+    message.value = currentLabel.value
   } catch (e) {
-    message.value = e.message || '저장 실패'
+    message.value = e.message || '생성 실패'
+    previewUrl.value = ''
   } finally {
     rendering.value = false
   }
 }
 
+function onImageLoad() {
+  imageLoading.value = false
+}
+function onImageError() {
+  imageLoading.value = false
+  message.value = '이미지를 표시하지 못했습니다'
+}
 
 async function downloadResult() {
-  let url = lastVariantUrl.value || props.sheet.result_image
-  if (!url) {
-    message.value = '다운로드할 이미지가 없습니다'
+  if (!previewUrl.value) {
+    message.value = '먼저 악보를 생성하세요'
     return
   }
-  // 캐시 쿼리 제거 + 같은 오리진(/media)으로 맞춤 (CORS 회피)
-  url = String(url).split('?')[0]
   try {
-    const u = new URL(url, window.location.origin)
-    if (u.pathname.startsWith('/media') || u.pathname.startsWith('/api/files')) {
-      url = u.pathname + (u.search || '')
+    let blob
+    if (previewUrl.value.startsWith('data:')) {
+      const res = await fetch(previewUrl.value)
+      blob = await res.blob()
+    } else {
+      const res = await apiFetch(previewUrl.value)
+      if (!res.ok) throw new Error('이미지 요청 실패')
+      blob = await res.blob()
     }
-  } catch (_) { /* relative ok */ }
-  try {
-    const res = await apiFetch(url)
-    if (!res.ok) throw new Error('이미지 요청 실패')
-    const blob = await res.blob()
     const title = (props.sheet.title || 'chordshift').replace(/[\\/:*?"<>|]/g, '_')
-    const key = keyLabel(props.sheet.chords || [], semitones.value)
+    const key = currentLabel.value || keyLabel(props.sheet.chords || [], semitones.value)
     const filename = `${title}_${key}.jpg`
     const objectUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -218,33 +179,6 @@ async function downloadResult() {
     message.value = e.message || '다운로드 실패'
   }
 }
-
-function showVariant(v) {
-  if (v?.image)
-  if (lastVariantUrl.value === v.image) return
-  imageLoading.value = true
-  lastVariantUrl.value = v.image
-  semitones.value = normalizeSemitones(v.transpose_semitones || 0)
-}
-
-async function deleteVariant(v) {
-  if (!v?.id) return
-  const isCorrected = (v.transpose_semitones === 0)
-  const msg = isCorrected
-    ? '원본을 삭제하면\n조옮김 악보를 포함한 곡 전체가 영구 삭제되며 복구할 수 없습니다.\n정말 삭제하시겠습니까?'
-    : `「${v.label}」 버전을 삭제할까요?`
-  if (!confirm(msg)) return
-  const res = await apiFetch(`/api/songs/${props.sheet.id}/variants/${v.id}/`, { method: 'DELETE' })
-  if (!res.ok) {
-    const err = await res.json().catch(()=>({}))
-    alert(err.error || '삭제 실패')
-    return
-  }
-  const data = await res.json()
-  if (data.deleted === 'song') { emit('back'); return }
-  localVariants.value = data.variants || localVariants.value.filter(x=>x.id!==v.id)
-  emit('updated', data.song)
-}
 </script>
 
 <template>
@@ -256,119 +190,211 @@ async function deleteVariant(v) {
 
     <h2>{{ sheet.title || '제목 없음' }}</h2>
 
-    <section class="transpose">
+    <section class="transpose card">
       <h3>조옮김</h3>
       <div class="btns">
-        <button @click="doTranspose(-1)" :disabled="rendering">−1</button>
-        <button @click="doTranspose(-2)" :disabled="rendering">−2</button>
+        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
+        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-2)">−2</button>
         <span class="cur">{{ semitones > 0 ? '+' : '' }}{{ semitones }}</span>
-        <button @click="doTranspose(1)" :disabled="rendering">+1</button>
-        <button @click="doTranspose(2)" :disabled="rendering">+2</button>
+        <button type="button" class="step" :disabled="rendering" @click="doTranspose(1)">+1</button>
+        <button type="button" class="step" :disabled="rendering" @click="doTranspose(2)">+2</button>
       </div>
+      <p class="label-line" v-if="currentLabel">{{ currentLabel }}</p>
       <p class="preview" v-if="previewChords.length">
         미리보기: {{ previewChords.slice(0, 12).join(' · ') }}{{ previewChords.length > 12 ? ' …' : '' }}
       </p>
+      <p class="hint muted">조옮김할 때마다 원본에서 바로 그립니다. 서버에 결과 이미지를 저장하지 않습니다.</p>
     </section>
 
-    <button class="save" :disabled="rendering" @click="renderAndSave">
-      {{ rendering ? '생성 중…' : '결과 악보 생성 · 저장' }}
-    </button>
+    <div class="actions">
+      <button type="button" class="btn-render" :disabled="rendering" @click="renderPreview">
+        {{ rendering ? '생성 중…' : '다시 생성' }}
+      </button>
+      <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
+        다운로드
+      </button>
+    </div>
 
     <p v-if="message" class="msg">{{ message }}</p>
 
-    <section v-if="localVariants.length" class="variants">
-      <h3>저장된 코드</h3>
-      <div class="var-list">
-        <div class="var-item" v-for="v in localVariants" :key="v.id">
-          <button
-            type="button"
-            class="var-chip"
-            :class="{ on: lastVariantUrl && v.image && lastVariantUrl === v.image, corrected: v.transpose_semitones === 0 }"
-            @click="showVariant(v)"
-          >
-            {{ v.transpose_semitones === 0 ? `원본(${v.label || '보정본'})` : (v.label || ((v.transpose_semitones > 0 ? '+' : '') + v.transpose_semitones)) }}
-          </button>
-          <button type="button" class="var-del" @click.stop="deleteVariant(v)">✕</button>
-        </div>
-      </div>
-    </section>
-
-    <section v-if="resultUrl || rendering" class="result">
+    <div class="result card" v-if="previewUrl || rendering">
       <div class="img-wrap">
-        <div v-if="rendering || imageLoading" class="img-loading">
-          <div class="spinner"></div>
-          <p>결과 악보를 생성·저장하는 중…</p>
+        <div v-if="imageLoading || rendering" class="img-loading">
+          <div class="spinner" />
+          <span>악보 준비 중…</span>
         </div>
         <img
-          v-if="resultUrl"
-          :key="resultUrl"
-          :src="resultUrl"
-          alt="결과 악보"
-          :class="{ dim: rendering }"
+          v-if="previewUrl"
+          :src="previewUrl"
+          alt="조옮김 결과"
+          :class="{ dim: imageLoading }"
           @load="onImageLoad"
           @error="onImageError"
         />
       </div>
-      <button type="button" class="dl" :disabled="!resultUrl || rendering || imageLoading" @click="downloadResult">
-        다운로드
-      </button>
-    </section>
-    <p v-else class="muted">아직 결과 이미지가 없습니다. 「결과 악보 생성 · 저장」을 눌러주세요.</p>
+    </div>
+    <p v-else class="muted empty">± 버튼으로 조옮김하면 결과가 여기에 표시됩니다.</p>
   </div>
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 1rem; }
-.top { display: flex; gap: 0.75rem; align-items: center; }
-.link { background: none; border: none; cursor: pointer; color: #1a1a2e; }
-.btns { display: flex; gap: 0.5rem; align-items: center; }
-.btns button { padding: 0.5rem 0.9rem; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
-.cur { min-width: 2.5rem; text-align: center; font-weight: 700; }
-.preview { font-size: 0.9rem; color: #444; }
-.save {
-  padding: 0.85rem 1.2rem; background: #0a7a3e; color: #fff; border: none;
-  border-radius: 8px; font-weight: 600; font-size: 1.05rem; cursor: pointer;
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
-.save:disabled { opacity: 0.5; }
-.result { padding: 1rem; border: 2px solid #0a7a3e; border-radius: 10px; background: #f6fbf8; }
-.result img { width: 100%; border-radius: 6px; border: 1px solid #ddd; display: block; }
-.result img.dim { opacity: 0.35; }
-.img-wrap { position: relative; min-height: 120px; }
-.img-loading {
-  position: absolute; inset: 0; z-index: 2;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 0.6rem; background: rgba(246, 251, 248, 0.85);
-  border-radius: 6px; color: #0a7a3e; font-weight: 600; font-size: 0.95rem;
+.top {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
 }
-.spinner {
-  width: 32px; height: 32px;
-  border: 3px solid #cce8d8; border-top-color: #0a7a3e;
-  border-radius: 50%; animation: spin 0.8s linear infinite;
+.link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #2563eb;
+  font-weight: 600;
+  padding: 0;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
-.dl:disabled { opacity: 0.5; cursor: not-allowed; }
-.dl {
-  display: inline-block;
-  margin-top: 0.5rem;
-  padding: 0.45rem 0.9rem;
-  background: #0d6efd;
+.link:hover {
+  text-decoration: underline;
+}
+h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+.card {
+  background: #fff;
+  border: 1px solid #e2e6ef;
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+.transpose h3 {
+  margin: 0 0 0.65rem;
+  font-size: 0.95rem;
+}
+.btns {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.step {
+  padding: 0.5rem 0.85rem;
+  background: #1e293b;
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
+  cursor: pointer;
   font-weight: 600;
+}
+.step:disabled {
+  opacity: 0.5;
+}
+.cur {
+  min-width: 2.75rem;
+  text-align: center;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.label-line {
+  margin: 0.6rem 0 0;
+  font-weight: 700;
+  color: #0f766e;
+}
+.preview {
+  margin: 0.4rem 0 0;
+  font-size: 0.88rem;
+  color: #4b5563;
+}
+.hint {
+  margin: 0.55rem 0 0;
+  font-size: 0.8rem;
+}
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.btn-render {
+  padding: 0.7rem 1.1rem;
+  background: #0f766e;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
   cursor: pointer;
 }
-.dl:hover { background: #0b5ed7; }
-.msg { color: #0a7; font-weight: 600; }
-.muted { color: #888; }
-.variants h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
-.var-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.var-chip {
-  padding: 0.35rem 0.7rem; border: 1px solid #ccc; border-radius: 16px;
-  background: #fff; cursor: pointer; font-size: 0.85rem;
+.btn-render:disabled {
+  opacity: 0.5;
 }
-.var-chip.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
-.var-chip.corrected { background:#1a1a2e; color:#fff; border-color:#1a1a2e; font-weight:700; }
-.var-item { display:flex; align-items:center; gap:0.2rem; }
-.var-del { background:none; border:none; cursor:pointer; color:#c00; font-weight:700; padding:0 0.3rem; }
+.btn-dl {
+  padding: 0.7rem 1.1rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-dl:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.msg {
+  margin: 0;
+  color: #0f766e;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.result img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  display: block;
+}
+.result img.dim {
+  opacity: 0.35;
+}
+.img-wrap {
+  position: relative;
+  min-height: 100px;
+}
+.img-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 8px;
+  color: #0f766e;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #ccfbf1;
+  border-top-color: #0f766e;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.muted {
+  color: #94a3b8;
+}
+.empty {
+  margin: 0;
+  font-size: 0.9rem;
+}
 </style>

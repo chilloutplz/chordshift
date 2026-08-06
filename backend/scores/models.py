@@ -8,7 +8,8 @@ class Song(models.Model):
     곡 단위 저장소(repository).
     - original_image: 업로드·최적화된 원본 악보
     - chords: 사용자가 보정한 코드·위치 (조옮김 0 기준)
-    변조·확정 이미지는 ScoreVariant 로 쌓임.
+    조옮김 결과는 저장하지 않고 원본+chords로 실시간 렌더.
+    ScoreVariant는 레거시(과거 저장된 변형 이미지)용이며 cleanup_variants 로 정리 가능.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=200, blank=True, default='', db_index=True)
