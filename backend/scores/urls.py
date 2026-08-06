@@ -11,6 +11,7 @@ router.register(r'songs', song_views.SongViewSet, basename='song')
 urlpatterns = [
     path('files/<path:name>', media_proxy, name='media-proxy'),
     path('temp/upload/', song_views.temp_upload, name='temp-upload'),
+    path('ocr-usage/', song_views.ocr_usage, name='ocr-usage'),
     path('temp/<str:temp_id>/chords/', song_views.temp_update_chords, name='temp-update-chords'),
     path('temp/<str:temp_id>/ocr/', song_views.temp_ocr, name='temp-ocr'),
     path('temp/job/<str:job_id>/', song_views.temp_job_status, name='temp-job-status'),

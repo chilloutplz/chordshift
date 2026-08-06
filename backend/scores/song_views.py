@@ -7,10 +7,11 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import viewsets
 
-from .models import Song, ScoreVariant
+from .models import Song, ScoreVariant, OcrUsage
 from .serializers import SongSerializer, ScoreVariantSerializer
 from .utils.image_process import optimize_for_mobile
 from .utils.temp_store import save_temp_image, load_meta, save_meta, image_path, delete_temp, cleanup_old_temps
+from .utils.ocr import get_usage_stats, OcrQuotaExceeded, OcrConfigError
 
 from .utils.config import DEFAULT_CHORD_FONT_SIZE
 
@@ -29,18 +30,33 @@ def temp_upload(request):
     meta['chord_font_size'] = int(request.data.get('chord_font_size', DEFAULT_CHORD_FONT_SIZE) or DEFAULT_CHORD_FONT_SIZE)
     chords = []
     ocr_raw = ''
+    ocr_usage = None
     if run_ocr:
         try:
             from .utils.ocr import run_ocr as do_ocr
             result = do_ocr(info['path'])
             chords = result.get('chords') or result.get('chord_lines') or []
-            ocr_raw = result.get('raw_text', '') or result.get('ocr_raw_text','')
+            ocr_raw = result.get('raw_text', '') or result.get('ocr_raw_text', '')
+            ocr_usage = result.get('ocr_usage')
+        except OcrQuotaExceeded as e:
+            return Response({
+                'error': 'ocr_quota_exceeded',
+                'message': f'이번 달 OCR 한도를 모두 사용했습니다 ({e.used}/{e.limit}). 다음 달에 다시 이용해주세요.',
+                'ocr_usage': {'used': e.used, 'limit': e.limit, 'remaining': 0, 'exceeded': True},
+                'temp_id': info['temp_id'],
+                'title': meta['title'],
+                'optimized_image': info['url'],
+                'chords': [],
+                'is_temp': True,
+            }, status=429)
+        except OcrConfigError as e:
+            ocr_raw = f'[OCR 설정 오류] {e}'
         except Exception as e:
             ocr_raw = f'[OCR error] {e}'
     meta['chords'] = chords
     meta['ocr_raw_text'] = ocr_raw
     save_meta(info['temp_id'], meta)
-    return Response({
+    payload = {
         'temp_id': info['temp_id'],
         'title': meta['title'],
         'optimized_image': info['url'],
@@ -48,7 +64,10 @@ def temp_upload(request):
         'chord_font_size': meta['chord_font_size'],
         'ocr_raw_text': ocr_raw,
         'is_temp': True,
-    }, status=201)
+    }
+    if ocr_usage:
+        payload['ocr_usage'] = ocr_usage
+    return Response(payload, status=201)
 
 
 @api_view(['POST'])
@@ -59,11 +78,19 @@ def temp_ocr(request, temp_id):
     try:
         from .utils.ocr import run_ocr as do_ocr
         result = do_ocr(str(path))
+    except OcrQuotaExceeded as e:
+        return Response({
+            'error': 'ocr_quota_exceeded',
+            'message': f'이번 달 OCR 한도를 모두 사용했습니다 ({e.used}/{e.limit}).',
+            'ocr_usage': {'used': e.used, 'limit': e.limit, 'remaining': 0, 'exceeded': True},
+        }, status=429)
+    except OcrConfigError as e:
+        return Response({'error': 'ocr_config', 'message': str(e)}, status=503)
     except Exception as e:
         return Response({'error': f'OCR 실패: {e}'}, status=500)
     meta = load_meta(temp_id) or {'temp_id': temp_id}
     meta['chords'] = result.get('chords') or []
-    meta['ocr_raw_text'] = result.get('raw_text', '') or result.get('ocr_raw_text','')
+    meta['ocr_raw_text'] = result.get('raw_text', '') or result.get('ocr_raw_text', '')
     save_meta(temp_id, meta)
     return Response({
         'temp_id': temp_id,
@@ -71,7 +98,18 @@ def temp_ocr(request, temp_id):
         'ocr_raw_text': meta['ocr_raw_text'],
         'chord_font_size': meta.get('chord_font_size', DEFAULT_CHORD_FONT_SIZE),
         'is_temp': True,
+        'ocr_usage': result.get('ocr_usage'),
     })
+
+
+@api_view(['GET'])
+def ocr_usage(request):
+    """이번 달 Google Vision OCR 사용량 (프론트 가시화용)"""
+    try:
+        stats = get_usage_stats()
+        return Response(stats)
+    except Exception as e:
+        return Response({'error': str(e), 'used': 0, 'limit': 1000, 'remaining': 1000, 'exceeded': False}, status=200)
 
 
 @api_view(['PATCH', 'POST'])

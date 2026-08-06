@@ -62,3 +62,16 @@ class ScoreVariant(models.Model):
 
     def __str__(self):
         return self.label or f'{self.kind} {self.transpose_semitones}'
+
+class OcrUsage(models.Model):
+    """월별 Google Vision OCR 사용 횟수 추적 (무료 티어 가시화)"""
+    month = models.CharField(max_length=7, unique=True, help_text='YYYY-MM')
+    count = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-month']
+
+    def __str__(self):
+        return f'{self.month}: {self.count}'
+
