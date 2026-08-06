@@ -193,7 +193,7 @@ async function downloadResult() {
     }
   } catch (_) { /* relative ok */ }
   try {
-    const res = await fetch(url)
+    const res = await apiFetch(url)
     if (!res.ok) throw new Error('이미지 요청 실패')
     const blob = await res.blob()
     const title = (props.sheet.title || 'chordshift').replace(/[\\/:*?"<>|]/g, '_')
