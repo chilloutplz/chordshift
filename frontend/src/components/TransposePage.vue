@@ -59,9 +59,14 @@ const semitones = ref(0)
 const rendering = ref(false)
 const imageLoading = ref(false)
 const message = ref('')
+const deleting = ref(false)
+const renderFailed = ref(false)
 /** data: URL 또는 빈 문자열 — 서버에 저장하지 않음 */
 const previewUrl = ref('')
 const currentLabel = ref('')
+
+// 가운데 "원곡(코드)" 버튼 라벨 - 항상 원본(0반음) 기준, 현재 위치와 무관하게 고정
+const originLabel = computed(() => `원곡(${keyLabel(props.sheet.chords || [], 0)})`)
 
 watch(
   () => props.sheet,
@@ -93,9 +98,19 @@ const previewChords = computed(() => {
   return lines.map((c) => transposeChordName(typeof c === 'string' ? c : c.chord, delta))
 })
 
+// ±1/±2 버튼: 기존처럼 현재 위치에서 누적 이동
 function doTranspose(delta) {
   semitones.value = normalizeSemitones(semitones.value + delta)
   currentLabel.value = keyLabel(props.sheet.chords || [], semitones.value)
+  message.value = ''
+  renderPreview()
+}
+
+// 가운데 "원곡(코드)" 버튼: 현재 위치와 무관하게 항상 0(원본 키)으로 바로 이동
+function goToOrigin() {
+  if (semitones.value === 0 && previewUrl.value) return // 이미 원곡이면 재렌더 생략
+  semitones.value = 0
+  currentLabel.value = keyLabel(props.sheet.chords || [], 0)
   message.value = ''
   renderPreview()
 }
@@ -108,7 +123,7 @@ async function renderPreview() {
   }
   rendering.value = true
   imageLoading.value = true
-  message.value = '악보 생성 중…'
+  renderFailed.value = false
   try {
     const res = await apiFetch(`/api/songs/${id}/render_variant/`, {
       method: 'POST',
@@ -131,10 +146,11 @@ async function renderPreview() {
     if (!url) throw new Error('이미지 데이터 없음')
     previewUrl.value = url
     currentLabel.value = data.label || keyLabel(props.sheet.chords || [], semitones.value)
-    message.value = currentLabel.value
+    message.value = ''
   } catch (e) {
     message.value = e.message || '생성 실패'
     previewUrl.value = ''
+    renderFailed.value = true
   } finally {
     rendering.value = false
   }
@@ -179,6 +195,32 @@ async function downloadResult() {
     message.value = e.message || '다운로드 실패'
   }
 }
+
+// 곡 삭제: DB 레코드 + 원본/변형 이미지(스토리지)까지 백엔드에서 함께 정리됨
+// (backend SongViewSet.destroy 참고)
+async function deleteSong() {
+  const id = props.sheet.id
+  if (!id) return
+  const title = props.sheet.title || '제목 없음'
+  const ok = window.confirm(
+    `"${title}" 곡을 삭제할까요?\n원본 이미지와 저장된 코드 데이터가 모두 삭제되며 되돌릴 수 없습니다.`,
+  )
+  if (!ok) return
+  deleting.value = true
+  message.value = ''
+  try {
+    const res = await apiFetch(`/api/songs/${id}/`, { method: 'DELETE' })
+    if (!res.ok && res.status !== 204) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || err.detail || '삭제 실패')
+    }
+    emit('back')
+  } catch (e) {
+    message.value = e.message || '삭제 실패'
+  } finally {
+    deleting.value = false
+  }
+}
 </script>
 
 <template>
@@ -186,6 +228,9 @@ async function downloadResult() {
     <div class="top">
       <button type="button" class="link" @click="emit('back')">← 목록</button>
       <button type="button" class="link" @click="emit('edit')">보정으로</button>
+      <button type="button" class="link danger" :disabled="deleting" @click="deleteSong">
+        {{ deleting ? '삭제 중…' : '삭제' }}
+      </button>
     </div>
 
     <h2>{{ sheet.title || '제목 없음' }}</h2>
@@ -193,13 +238,21 @@ async function downloadResult() {
     <section class="transpose card">
       <h3>조옮김</h3>
       <div class="btns">
-        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(-2)">−2</button>
-        <span class="cur">{{ semitones > 0 ? '+' : '' }}{{ semitones }}</span>
+        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
+        <button
+          type="button"
+          class="step origin"
+          :class="{ active: semitones === 0 }"
+          :disabled="rendering"
+          @click="goToOrigin"
+        >{{ originLabel }}</button>
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(1)">+1</button>
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(2)">+2</button>
       </div>
-      <p class="label-line" v-if="currentLabel">{{ currentLabel }}</p>
+      <p class="cur-status" v-if="semitones !== 0">
+        현재 {{ semitones > 0 ? '+' : '' }}{{ semitones }} · {{ currentLabel }}
+      </p>
       <p class="preview" v-if="previewChords.length">
         미리보기: {{ previewChords.slice(0, 12).join(' · ') }}{{ previewChords.length > 12 ? ' …' : '' }}
       </p>
@@ -207,15 +260,15 @@ async function downloadResult() {
     </section>
 
     <div class="actions">
-      <button type="button" class="btn-render" :disabled="rendering" @click="renderPreview">
-        {{ rendering ? '생성 중…' : '다시 생성' }}
-      </button>
       <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
         다운로드
       </button>
     </div>
 
-    <p v-if="message" class="msg">{{ message }}</p>
+    <p v-if="message" class="msg" :class="{ error: renderFailed }">
+      {{ message }}
+      <button v-if="renderFailed" type="button" class="retry-link" @click="renderPreview">다시 시도</button>
+    </p>
 
     <div class="result card" v-if="previewUrl || rendering">
       <div class="img-wrap">
@@ -259,6 +312,15 @@ async function downloadResult() {
 .link:hover {
   text-decoration: underline;
 }
+.link.danger {
+  color: #dc2626;
+  margin-left: auto;
+}
+.link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  text-decoration: none;
+}
 h2 {
   margin: 0;
   font-size: 1.25rem;
@@ -293,16 +355,19 @@ h2 {
 .step:disabled {
   opacity: 0.5;
 }
-.cur {
-  min-width: 2.75rem;
-  text-align: center;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-}
-.label-line {
-  margin: 0.6rem 0 0;
+.step.origin {
+  background: #0f766e;
   font-weight: 700;
-  color: #0f766e;
+  white-space: nowrap;
+}
+.step.origin.active {
+  background: #0a5c55;
+  box-shadow: inset 0 0 0 2px #6ee7d5;
+}
+.cur-status {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: #4b5563;
 }
 .preview {
   margin: 0.4rem 0 0;
@@ -317,18 +382,6 @@ h2 {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-}
-.btn-render {
-  padding: 0.7rem 1.1rem;
-  background: #0f766e;
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.btn-render:disabled {
-  opacity: 0.5;
 }
 .btn-dl {
   padding: 0.7rem 1.1rem;
@@ -348,6 +401,23 @@ h2 {
   color: #0f766e;
   font-weight: 600;
   font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.msg.error {
+  color: #c00;
+}
+.retry-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #2563eb;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: underline;
 }
 .result img {
   width: 100%;

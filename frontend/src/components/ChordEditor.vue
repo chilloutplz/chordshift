@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { API_BASE, apiFetch } from '@/api/api.js'
 
 const props = defineProps({
@@ -39,9 +39,61 @@ const placeChord = ref('')
 const customChord = ref('')
 const stageRef = ref(null)
 const drag = ref(null)
-const chordFontPx = ref(17)
+const chordFontPx = ref(13)
 const selectedRoot = ref(null)
-const dupCandidates = ref([])
+
+// --- 저장 시 제목 입력 모달 ---
+const showSaveModal = ref(false)
+const saveTitle = ref('')
+const saveTitleError = ref('')
+const forceNewOnDuplicate = ref(false)
+const dupCandidates = ref([]) // 중복 제목 발견 시 서버가 내려주는 기존 곡 후보 목록
+const titleInputRef = ref(null)
+
+// 모달이 열릴 때 제목 입력창에 자동 포커스 + 전체 선택 (바로 타이핑해서 덮어쓸 수 있게)
+watch(showSaveModal, async (open) => {
+  if (!open) return
+  await nextTick()
+  titleInputRef.value?.focus()
+  titleInputRef.value?.select()
+})
+
+function openSaveModal() {
+  saveTitle.value = (props.sheet.title || '').trim()
+  saveTitleError.value = ''
+  forceNewOnDuplicate.value = false
+  dupCandidates.value = []
+  showSaveModal.value = true
+}
+function closeSaveModal() {
+  if (confirming.value) return
+  showSaveModal.value = false
+}
+// 제목 입력 후 (다시) 저장 시도 - 중복 후보 목록은 초기화하고 새로 확인
+function submitSaveModal() {
+  const t = saveTitle.value.trim()
+  if (!t) {
+    saveTitleError.value = '제목을 입력해주세요'
+    return
+  }
+  saveTitle.value = t
+  saveTitleError.value = ''
+  dupCandidates.value = []
+  forceNewOnDuplicate.value = false
+  confirmSheet()
+}
+// 중복 후보 중 하나를 골라 그 곡에 덮어쓰기 (merge)
+function mergeIntoCandidate(candidate) {
+  saveTitleError.value = ''
+  confirmSheet(candidate.id)
+}
+// 중복이어도 별개의 새 곡으로 저장
+function saveAsNewAnyway() {
+  saveTitleError.value = ''
+  forceNewOnDuplicate.value = true
+  confirmSheet()
+}
+
 
 function keyLabelFromLines(linesArr, semitones = 0) {
   const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -649,35 +701,35 @@ async function saveBase(mergeSongId = null, forceNew = false) {
 }
 
 
-async function confirmSheet() {
+async function confirmSheet(mergeId = null) {
   confirming.value = true
   message.value = ''
+  const titleToSave = saveTitle.value.trim()
   try {
     await saveLines()
-    let song = { ...props.sheet, chords: lines.value, chord_font_size: chordFontPx.value }
+    let song = { ...props.sheet, title: titleToSave, chords: lines.value, chord_font_size: chordFontPx.value }
 
     if (isTemp()) {
       const body = {
         temp_id: sheetId(),
-        title: props.sheet.title || '',
+        title: titleToSave,
         chords: lines.value,
         chord_font_size: chordFontPx.value,
-        force_new: false,
+        force_new: forceNewOnDuplicate.value,
       }
-      let res = await apiFetch('/api/songs/from-temp/', {
+      if (mergeId) body.merge_song_id = mergeId
+      const res = await apiFetch('/api/songs/from-temp/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      let data = await res.json().catch(() => ({}))
+      const data = await res.json().catch(() => ({}))
       if (res.status === 409 && data.error === 'duplicate_title') {
-        body.force_new = true
-        res = await apiFetch('/api/songs/from-temp/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-        data = await res.json().catch(() => ({}))
+        // 조용히 새 곡으로 만들지 않고, 사용자가 직접 "덮어쓰기" 또는 "새 곡으로 저장"을 선택하게 함
+        dupCandidates.value = data.candidates || []
+        saveTitleError.value = data.message || `"${titleToSave}" 제목의 곡이 이미 있습니다.`
+        showSaveModal.value = true
+        return
       }
       if (!res.ok) {
         throw new Error(data.error || data.message || '보정본 저장 실패. migrate / 서버 재시작을 확인하세요.')
@@ -698,7 +750,7 @@ async function confirmSheet() {
         body: JSON.stringify({
           chords: lines.value,
           chord_font_size: chordFontPx.value,
-          title: props.sheet.title || '',
+          title: titleToSave,
         }),
       })
       if (!res.ok) throw new Error('저장 실패')
@@ -714,11 +766,14 @@ async function confirmSheet() {
 
     if (!song.id) throw new Error('곡 ID가 없습니다')
 
-    // 온디맨드 렌더: 확정 시 variant 이미지 저장하지 않음. 조옮김 화면에서 실시간 생성.
-    message.value = '확정됨 · 조옮김 단계로 이동'
+    dupCandidates.value = []
+    forceNewOnDuplicate.value = false
+    showSaveModal.value = false
+    // 온디맨드 렌더: 저장 시 variant 이미지 저장하지 않음. 조옮김 화면에서 실시간 생성.
+    message.value = '저장됨 · 조옮김 단계로 이동'
     emit('next', song)
   } catch (e) {
-    message.value = e.message || '확정 실패'
+    message.value = e.message || '저장 실패'
   } finally {
     confirming.value = false
   }
@@ -877,14 +932,60 @@ const ocrStatusText = computed(() => {
         <button @click="doTranspose(2)" :disabled="saving">+2</button>
       </div>
     </section>
-    <button class="confirm" :disabled="confirming || !lines.length" @click="confirmSheet">
-      {{ confirming ? '확정 중…' : '확정 · 조옮김 단계로' }}
+    <button class="confirm" :disabled="confirming || !lines.length" @click="openSaveModal">
+      {{ confirming ? '저장 중…' : '저장' }}
     </button>
     <section v-if="pageMode !== 'correct' && resultUrl" class="result-section">
       <h3>생성된 기타 코드 악보</h3>
       <img :src="resultUrl" alt="결과 악보" class="result-img" />
       <a class="dl" :href="resultUrl" target="_blank" rel="noopener" download>이미지 열기 / 저장</a>
     </section>
+
+    <div v-if="showSaveModal" class="modal-backdrop" @click.self="closeSaveModal">
+      <div class="modal-box">
+        <h3>제목 입력</h3>
+        <p class="modal-hint">
+          중복 저장을 막기 위해 정확한 곡 제목을 입력해주세요.
+        </p>
+        <input
+          ref="titleInputRef"
+          v-model="saveTitle"
+          type="text"
+          class="modal-input"
+          placeholder="곡 제목"
+          :disabled="confirming"
+          @keyup.enter="submitSaveModal"
+        />
+        <p v-if="saveTitleError" class="modal-error">{{ saveTitleError }}</p>
+
+        <div v-if="dupCandidates.length" class="dup-block">
+          <p class="dup-label">기존 곡에 덮어쓸까요?</p>
+          <button
+            v-for="c in dupCandidates"
+            :key="c.id"
+            type="button"
+            class="dup-item"
+            :disabled="confirming"
+            @click="mergeIntoCandidate(c)"
+          >
+            {{ c.title || '(제목 없음)' }} 덮어쓰기
+          </button>
+          <button type="button" class="dup-newone" :disabled="confirming" @click="saveAsNewAnyway">
+            아니요, 별개의 새 곡으로 저장
+          </button>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="modal-cancel" :disabled="confirming" @click="closeSaveModal">취소</button>
+          <button v-if="!dupCandidates.length" type="button" class="modal-save" :disabled="confirming" @click="submitSaveModal">
+            {{ confirming ? '저장 중…' : '저장' }}
+          </button>
+          <button v-else type="button" class="modal-save" :disabled="confirming" @click="submitSaveModal">
+            {{ confirming ? '확인 중…' : '제목 다시 확인' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1120,6 +1221,92 @@ const ocrStatusText = computed(() => {
 .current { min-width: 2.5rem; text-align: center; font-weight: 700; }
 .confirm { padding: 0.85rem 1.25rem; background: #0a7a3e; color: #fff; border: none; border-radius: 8px; font-size: 1.05rem; font-weight: 600; cursor: pointer; }
 .confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 17, 26, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.modal-box {
+  width: 100%;
+  max-width: 380px;
+  background: #fff;
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+.modal-box h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.modal-hint { margin: 0 0 0.85rem; font-size: 0.85rem; color: #555; line-height: 1.5; }
+.modal-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+.modal-error { margin: 0.5rem 0 0; color: #c00; font-size: 0.85rem; }
+.dup-block {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: #fff8e6;
+  border: 1px solid #e6c200;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.dup-label { margin: 0 0 0.1rem; font-size: 0.85rem; font-weight: 700; color: #7a5d00; }
+.dup-item {
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid #d9b800;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.dup-item:hover { background: #fff3cd; }
+.dup-newone {
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  border: 1px dashed #999;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #555;
+}
+.dup-item:disabled,
+.dup-newone:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.modal-cancel {
+  padding: 0.55rem 1rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.modal-save {
+  padding: 0.55rem 1.1rem;
+  border: none;
+  border-radius: 6px;
+  background: #0a7a3e;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.modal-cancel:disabled,
+.modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
 .msg { color: #0a7; }
 .result-section { margin-top: 0.5rem; padding: 1rem; border: 2px solid #0a7a3e; border-radius: 10px; background: #f6fbf8; }
 .result-section h3 { margin: 0 0 0.75rem; color: #0a7a3e; }

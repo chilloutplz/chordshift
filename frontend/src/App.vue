@@ -106,7 +106,16 @@ onMounted(loadOcrUsage)
         target="_blank"
         rel="noopener noreferrer"
         title="Uncle Bob"
-      >2026 Uncle Bob ☕</a>
+      >
+        <span>2026 Uncle Bob</span>
+        <img 
+          src="/coffee/coffee-24.png" 
+          alt="coffee" 
+          class="coffee-icon"
+          width="20"
+          height="20"
+        />
+      </a>
     </footer>
   </div>
 </template>
@@ -240,6 +249,20 @@ onMounted(loadOcrUsage)
 }
 .credit:hover {
   color: #5c6578;
+}
+
+.foot .credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px; /* 글자랑 아이콘 사이 간격 */
+  text-decoration: none;
+}
+
+.coffee-icon {
+  display: inline-block;
+  object-fit: contain;
+  /* 파란 배경 푸터면 흰색 버전이 더 잘 보여! */
+  /* filter: brightness(0) invert(1);  <- 필요하면 주석 해제 */
 }
 
 @media (max-width: 480px) {
