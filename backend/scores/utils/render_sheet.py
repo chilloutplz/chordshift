@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def _get_font(size: int):
-    size = max(11, min(int(size), 30))
+    size = max(9, min(int(size), 30))
     for path in [
         'C:/Windows/Fonts/arialbd.ttf',
         'C:/Windows/Fonts/arial.ttf',
@@ -59,7 +59,7 @@ def render_transposed_sheet(image_path: str, chords: list, font_size: int = None
 
         band_h = max(int(h * band_h_n), 14)
         if font_size is not None:
-            fs = max(11, min(int(font_size), 30))
+            fs = max(9, min(int(font_size), 30))
         else:
             fs = max(12, min(int(band_h * 0.85), int(h * 0.016) + 2))
         font = _get_font(fs)

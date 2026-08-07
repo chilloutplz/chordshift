@@ -231,11 +231,11 @@ onMounted(loadOcrUsage)
 }
 
 .credit {
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: #7a8294;
   text-decoration: none;
   letter-spacing: 0.01em;
-  font-weight: 500;
+  font-weight: 1000;
   transition: color 0.15s;
 }
 .credit:hover {

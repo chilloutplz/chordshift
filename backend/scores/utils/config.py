@@ -8,4 +8,4 @@ def _setting(name, default):
 # =========================
 # Chord
 # =========================
-DEFAULT_CHORD_FONT_SIZE = _setting("DEFAULT_CHORD_FONT_SIZE", 15)
+DEFAULT_CHORD_FONT_SIZE = _setting("DEFAULT_CHORD_FONT_SIZE", 17)

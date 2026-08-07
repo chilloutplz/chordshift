@@ -39,7 +39,7 @@ const placeChord = ref('')
 const customChord = ref('')
 const stageRef = ref(null)
 const drag = ref(null)
-const chordFontPx = ref(15)
+const chordFontPx = ref(17)
 const selectedRoot = ref(null)
 const dupCandidates = ref([])
 
