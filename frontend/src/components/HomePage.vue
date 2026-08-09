@@ -11,11 +11,13 @@ const allSongs = ref([])
 const loading = ref(false)
 const error = ref('')
 const searched = ref(false)
-const openFolder = ref(null)
+const isSearchResult = ref(false) // allSongs가 검색 필터링된 결과인지 여부
+const currentFolder = ref(null) // 탐색기처럼: null이면 폴더 루트, 아니면 그 폴더 안
 const uploading = ref(false)
 const uploadError = ref('')
 const fileInput = ref(null)
 const pendingTitle = ref('')
+const searchInputRef = ref(null)
 
 function getCho(title) {
   const c = (title || '').trim().charAt(0)
@@ -55,9 +57,31 @@ const folders = computed(() => {
   }))
 })
 
+const currentFolderSongs = computed(() => {
+  const f = folders.value.find((f) => f.key === currentFolder.value)
+  return f ? f.songs : []
+})
+
+function thumbUrl(s) {
+  let u = s.optimized_image || s.original_image || ''
+  if (!u) return ''
+  if (typeof u === 'object' && u.url) u = u.url
+  u = String(u)
+  if (u.startsWith('data:')) return u
+  if (u.startsWith('/')) u = `${API_BASE}${u}`
+  if (u.includes('127.0.0.1') || u.includes('localhost')) {
+    u = u.replace('https://', 'http://')
+  } else if (u.startsWith('http://') && API_BASE.startsWith('https://')) {
+    u = u.replace('http://', 'https://')
+  }
+  return u
+}
+
 async function loadAll() {
   loading.value = true
   error.value = ''
+  isSearchResult.value = false
+  currentFolder.value = null
   try {
     const res = await apiFetch(`/api/songs/`)
     if (!res.ok) throw new Error('목록을 불러오지 못했습니다')
@@ -76,11 +100,13 @@ async function search() {
   searched.value = true
   loading.value = true
   error.value = ''
+  currentFolder.value = null
   try {
     if (!q) {
       await loadAll()
       return
     }
+    isSearchResult.value = true
     const res = await apiFetch(`/api/songs/search/?q=${encodeURIComponent(q)}`)
     if (!res.ok) throw new Error('검색 실패')
     const data = await res.json()
@@ -93,8 +119,11 @@ async function search() {
   }
 }
 
-function toggleFolder(key) {
-  openFolder.value = openFolder.value === key ? null : key
+function openFolderNav(key) {
+  currentFolder.value = key
+}
+function goToRoot() {
+  currentFolder.value = null
 }
 
 // ★ 핵심: 업로드 중간 페이지 없이 바로 편집으로!
@@ -135,6 +164,7 @@ async function onFileSelected(e) {
 onMounted(() => {
   searched.value = false
   loadAll()
+  searchInputRef.value?.focus()
 })
 </script>
 
@@ -142,82 +172,129 @@ onMounted(() => {
   <section class="home">
     <div class="hero">
       <h2>곡 찾아보기</h2>
-      <p class="lead">제목으로 검색하거나, 초성 폴더에서 고른 뒤 조옮김하세요.</p>
+      <p class="lead">제목의 일부로 검색할 수 있어요. 초성 폴더에서 골라도 됩니다.</p>
     </div>
 
     <input ref="fileInput" type="file" accept="image/*" class="sr-only" @change="onFileSelected" />
 
     <form class="search-row card" @submit.prevent="search">
       <input
+        ref="searchInputRef"
         v-model="query"
         class="field"
         type="search"
-        placeholder="곡 제목 검색…"
+        placeholder="검색"
         autocomplete="off"
         enterkeyhint="search"
       />
       <button type="submit" class="btn btn-primary" :disabled="loading">
         {{ loading ? '검색 중…' : '검색' }}
       </button>
+      <button
+        type="button"
+        class="btn btn-dashed upload-inline"
+        :disabled="uploading"
+        @click="triggerUpload(query)"
+        title="악보 이미지 업로드"
+      >
+        {{ uploading ? '업로드 중…' : '+ 업로드' }}
+      </button>
     </form>
 
-    <div v-if="searched" class="upload-panel card">
+    <p v-if="uploading" class="uploading-msg">업로드 중… 편집 화면으로 이동합니다.</p>
+    <p v-if="uploadError" class="error">{{ uploadError }}</p>
+
+    <div v-if="isSearchResult" class="upload-panel card">
       <p v-if="!loading && !allSongs.length" class="empty-msg">
         「{{ query || '검색어' }}」에 해당하는 곡이 없습니다.
       </p>
       <p v-else-if="!loading && allSongs.length" class="hint-msg">
-        원하는 곡이 없나요? 제목이 같아도 다른 악보일 수 있어요.
+        원하는 곡이 없나요? 제목이 같아도 다른 악보일 수 있어요. 위 「+ 업로드」로 새로 추가할 수 있어요.
       </p>
-      <button
-        v-if="!loading && !uploading"
-        type="button"
-        class="btn btn-dashed upload-btn"
-        @click="triggerUpload(query)"
-      >
-        + 새 악보 업로드
-      </button>
-      <p v-if="uploading" class="uploading-msg">업로드 중… 편집 화면으로 이동합니다.</p>
-      <p v-if="uploadError" class="error">{{ uploadError }}</p>
-    </div>
-
-    <div v-if="!searched" class="quick-upload">
-      <button type="button" class="btn btn-dashed upload-btn" :disabled="uploading" @click="triggerUpload()">
-        {{ uploading ? '업로드 중…' : '+ 악보 이미지 업로드' }}
-      </button>
-      <p v-if="uploadError" class="error">{{ uploadError }}</p>
     </div>
 
     <p v-if="error" class="error status">{{ error }}</p>
     <p v-else-if="loading" class="muted status">불러오는 중…</p>
 
     <template v-else>
-      <div class="list-head">
-        <h3 class="sub">전체 {{ allSongs.length }}곡</h3>
-      </div>
-      <ul v-if="folders.length" class="folder-list">
-        <li v-for="f in folders" :key="f.key" class="folder">
-          <button type="button" class="folder-head" @click="toggleFolder(f.key)">
-            <span class="cho">{{ f.key }}</span>
-            <span class="fname">{{ f.key }} 폴더</span>
-            <span class="count">{{ f.count }}</span>
-            <span class="chev">{{ openFolder === f.key ? '▾' : '▸' }}</span>
+      <!-- 검색 결과: 폴더 없이 바로 평면 목록 -->
+      <template v-if="isSearchResult">
+        <div class="list-head">
+          <h3 class="sub">검색 결과 {{ allSongs.length }}곡</h3>
+        </div>
+        <ul v-if="allSongs.length" class="file-list">
+          <li v-for="s in allSongs" :key="s.id">
+            <button type="button" class="file-item" @click="emit('open', s)">
+              <span class="file-thumb">
+                <img v-if="thumbUrl(s)" :src="thumbUrl(s)" alt="" loading="lazy" />
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M9 18V5l11-2v13" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  <circle cx="6" cy="18" r="3" stroke="#94a3b8" stroke-width="1.6" />
+                  <circle cx="17" cy="16" r="3" stroke="#94a3b8" stroke-width="1.6" />
+                </svg>
+              </span>
+              <span class="file-title">{{ s.title || '(제목 없음)' }}</span>
+            </button>
+          </li>
+        </ul>
+      </template>
+
+      <!-- 폴더 안: 탐색기처럼 해당 폴더 곡만 -->
+      <template v-else-if="currentFolder">
+        <div class="breadcrumb">
+          <button type="button" class="crumb" @click="goToRoot">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M3 11.5 12 4l9 7.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            전체 곡
           </button>
-          <ul v-if="openFolder === f.key" class="song-list">
-            <li v-for="s in f.songs" :key="s.id">
-              <button type="button" class="song-item" @click="emit('open', s)">
-                <span class="title">{{ s.title || '(제목 없음)' }}</span>
-              </button>
-            </li>
-          </ul>
-        </li>
-      </ul>
-      <div v-else class="empty-state card">
-        <p class="empty-title">아직 저장된 곡이 없어요</p>
-        <p class="muted">악보 이미지를 업로드하면 OCR 후 코드를 보정·조옮김할 수 있습니다.</p>
-        <button type="button" class="btn btn-primary" :disabled="uploading" @click="triggerUpload()">
-          첫 악보 업로드
-        </button>
-      </div>
+          <span class="crumb-sep">›</span>
+          <span class="crumb-current">{{ currentFolder }} <em>({{ currentFolderSongs.length }})</em></span>
+        </div>
+        <ul v-if="currentFolderSongs.length" class="file-list">
+          <li v-for="s in currentFolderSongs" :key="s.id">
+            <button type="button" class="file-item" @click="emit('open', s)">
+              <span class="file-thumb">
+                <img v-if="thumbUrl(s)" :src="thumbUrl(s)" alt="" loading="lazy" />
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M9 18V5l11-2v13" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  <circle cx="6" cy="18" r="3" stroke="#94a3b8" stroke-width="1.6" />
+                  <circle cx="17" cy="16" r="3" stroke="#94a3b8" stroke-width="1.6" />
+                </svg>
+              </span>
+              <span class="file-title">{{ s.title || '(제목 없음)' }}</span>
+            </button>
+          </li>
+        </ul>
+      </template>
+
+      <!-- 루트: 폴더 아이콘 그리드 -->
+      <template v-else>
+        <div class="list-head">
+          <h3 class="sub">전체 {{ allSongs.length }}곡</h3>
+        </div>
+        <ul v-if="folders.length" class="folder-grid">
+          <li v-for="f in folders" :key="f.key">
+            <button type="button" class="folder-tile" @click="openFolderNav(f.key)">
+              <span class="folder-icon-wrap">
+                <svg width="42" height="42" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.379a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 12.12 7H19.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-11Z" fill="#facc15" stroke="#d97706" stroke-width="1" />
+                </svg>
+                <span class="folder-glyph">{{ f.key }}</span>
+              </span>
+              <span class="folder-count">{{ f.count }}곡</span>
+            </button>
+          </li>
+        </ul>
+        <div v-else class="empty-state card">
+          <p class="empty-title">아직 저장된 곡이 없어요</p>
+          <p class="muted">악보 이미지를 업로드하면 OCR 후 코드를 보정·조옮김할 수 있습니다.</p>
+          <button type="button" class="btn btn-primary" :disabled="uploading" @click="triggerUpload()">
+            첫 악보 업로드
+          </button>
+        </div>
+      </template>
     </template>
   </section>
 </template>
@@ -254,10 +331,34 @@ onMounted(() => {
   gap: 0.5rem;
   padding: 0.75rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 .search-row .field {
   flex: 1;
-  min-width: 0;
+  min-width: 120px;
+}
+.upload-inline {
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding: 0.65rem 0.9rem;
+}
+@media (max-width: 480px) {
+  .search-row {
+    padding: 0.5rem;
+    gap: 0.35rem;
+  }
+  .search-row .field {
+    padding: 0.55rem 0.65rem;
+    font-size: 0.9rem;
+    min-width: 80px;
+  }
+  .search-row .btn {
+    padding: 0.5rem 0.7rem;
+    font-size: 0.85rem;
+  }
+  .upload-inline {
+    padding: 0.5rem 0.6rem;
+  }
 }
 .upload-panel {
   display: flex;
@@ -273,13 +374,6 @@ onMounted(() => {
   margin: 0;
   font-size: 0.9rem;
   color: var(--text-muted, #5c6578);
-}
-.upload-btn {
-  width: 100%;
-  padding: 0.85rem 1rem;
-}
-.quick-upload {
-  margin-top: 0.15rem;
 }
 .uploading-msg {
   margin: 0;
@@ -304,93 +398,139 @@ onMounted(() => {
   color: #374151;
   font-weight: 700;
 }
-.folder-list {
+.folder-grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 0.6rem;
+}
+.folder-tile {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.75rem 0.4rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.folder-tile:hover {
+  border-color: #93c5fd;
+  background: var(--primary-soft, #eff4ff);
+}
+.folder-tile:active {
+  transform: scale(0.96);
+}
+.folder-icon-wrap {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.folder-glyph {
+  position: absolute;
+  top: 58%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-weight: 800;
+  font-size: 0.95rem;
+  color: #78350f;
+  line-height: 1;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+.folder-count {
+  font-size: 0.72rem;
+  color: var(--text-muted, #5c6578);
+  font-variant-numeric: tabular-nums;
+}
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.1rem;
+  margin-bottom: 0.15rem;
+  font-size: 0.9rem;
+}
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: none;
+  border: none;
+  padding: 0.2rem 0.3rem;
+  color: var(--primary, #2563eb);
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.crumb:hover {
+  background: var(--primary-soft, #eff4ff);
+}
+.crumb-sep {
+  color: #b0b8c4;
+}
+.crumb-current {
+  font-weight: 700;
+  color: #1f2937;
+}
+.crumb-current em {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--text-muted, #5c6578);
+  font-size: 0.85rem;
+}
+.file-list {
   list-style: none;
   padding: 0;
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.35rem;
 }
-.folder-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.7rem 0.85rem;
-  border: 1px solid var(--border, #e2e6ef);
-  border-radius: var(--radius-sm, 8px);
-  background: var(--surface, #fff);
-  cursor: pointer;
-  text-align: left;
-  box-shadow: var(--shadow, none);
-  transition: border-color 0.15s, background 0.15s;
-}
-.folder-head:hover {
-  border-color: #93c5fd;
-  background: var(--primary-soft, #eff4ff);
-}
-.cho {
-  width: 1.85rem;
-  height: 1.85rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(145deg, #1e293b, #334155);
-  color: #fff;
-  border-radius: 7px;
-  font-weight: 800;
-  font-size: 0.9rem;
-  flex-shrink: 0;
-}
-.fname {
-  flex: 1;
-  font-weight: 600;
-  color: #1f2937;
-}
-.count {
-  font-size: 0.8rem;
-  color: var(--text-muted, #5c6578);
-  font-variant-numeric: tabular-nums;
-}
-.chev {
-  color: #94a3b8;
-  font-size: 0.85rem;
-}
-.song-list {
-  list-style: none;
-  padding: 0.4rem 0 0.2rem 0.65rem;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-.song-item {
+.file-item {
   width: 100%;
   text-align: left;
-  padding: 0.6rem 0.8rem;
+  padding: 0.5rem 0.7rem;
   border: 1px solid var(--border, #e2e6ef);
   border-radius: 8px;
   background: #fff;
   cursor: pointer;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.65rem;
   transition: border-color 0.15s, background 0.15s;
 }
-.song-item:hover {
+.file-item:hover {
   border-color: #93c5fd;
   background: var(--primary-soft, #eff4ff);
 }
-.title {
+.file-thumb {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e5e9f0;
+}
+.file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.file-title {
   font-weight: 600;
   color: #1f2937;
-}
-.meta {
-  font-size: 0.78rem;
-  color: #94a3b8;
-  flex-shrink: 0;
 }
 .empty-state {
   text-align: center;

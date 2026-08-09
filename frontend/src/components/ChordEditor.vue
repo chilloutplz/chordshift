@@ -42,6 +42,79 @@ const drag = ref(null)
 const chordFontPx = ref(13)
 const selectedRoot = ref(null)
 
+// --- 코드줄 다중 선택 (Shift+클릭, 모바일은 "다중 선택" 토글) ---
+const multiSelectMode = ref(false)
+const selectedLineIds = ref([])
+const showLineHelp = ref(false) // Shift+클릭 안내를 기본적으로 숨기고 ? 버튼으로만 노출
+const toolsOpen = ref(true) // Tools 패널 접기/펼치기
+
+// 이동/좌우 툴이 실제로 작동할 대상 줄 id 목록.
+// 다중 선택된 게 있으면 그것들, 없으면 현재 활성(activeLineId) 하나.
+const targetLineIds = computed(() =>
+  selectedLineIds.value.length ? selectedLineIds.value : (activeLineId.value ? [activeLineId.value] : []),
+)
+
+function isLineSelected(id) {
+  if (selectedLineIds.value.length) return selectedLineIds.value.includes(id)
+  return activeLineId.value === id
+}
+
+function toggleLineSelection(id) {
+  const idx = selectedLineIds.value.indexOf(id)
+  if (idx >= 0) {
+    selectedLineIds.value = selectedLineIds.value.filter((x) => x !== id)
+  } else {
+    selectedLineIds.value = [...selectedLineIds.value, id]
+  }
+  activeLineId.value = id
+}
+
+function toggleMultiSelectMode() {
+  multiSelectMode.value = !multiSelectMode.value
+  if (!multiSelectMode.value) selectedLineIds.value = []
+}
+
+function clearLineSelection() {
+  selectedLineIds.value = []
+}
+
+// --- 코드줄 이동 / 코드만 좌우 이동 툴 (버튼식, 폰트 크기 조절 툴과 동일한 방식) ---
+const LINE_NUDGE_STEP = 0.006 // 줄 전체 이동 간격
+const CHORD_NUDGE_STEP = 0.01 // 코드만 좌우 이동 간격
+
+function targetLines() {
+  const ids = targetLineIds.value
+  return lines.value.filter((L) => ids.includes(L.id))
+}
+
+// 줄 전체를 상하좌우로 이동 (프레임 xStart/xEnd/y를 함께 옮김 - 코드 간 간격 유지)
+function nudgeLine(dx, dy) {
+  const targets = targetLines()
+  if (!targets.length) return
+  for (const L of targets) {
+    const width = (L.xEnd ?? 0.99) - (L.xStart ?? 0.01)
+    let newXStart = (L.xStart ?? 0.01) + dx
+    newXStart = Math.max(0.005, Math.min(0.995 - width, newXStart))
+    L.xStart = newXStart
+    L.xEnd = newXStart + width
+    L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy))
+  }
+  saveLines()
+}
+
+// 줄의 프레임은 그대로 두고, 그 안의 코드들만 좌우로 같이 이동
+function nudgeChords(dt) {
+  const targets = targetLines()
+  if (!targets.length) return
+  for (const L of targets) {
+    for (const it of L.items || []) {
+      const cur = typeof it.t === 'number' ? it.t : 0.5
+      it.t = Math.min(0.98, Math.max(0.02, cur + dt))
+    }
+  }
+  saveLines()
+}
+
 // --- 저장 시 제목 입력 모달 ---
 const showSaveModal = ref(false)
 const saveTitle = ref('')
@@ -64,6 +137,16 @@ function openSaveModal() {
   forceNewOnDuplicate.value = false
   dupCandidates.value = []
   showSaveModal.value = true
+}
+// 저장 버튼 클릭: 신규(temp) 업로드는 제목을 물어봐야 하지만,
+// 이미 저장된 곡을 "수정"하는 경우엔 제목을 다시 물을 필요가 없으므로 바로 저장한다.
+function handleSaveClick() {
+  if (isTemp()) {
+    openSaveModal()
+  } else {
+    saveTitle.value = (props.sheet.title || '').trim()
+    confirmSheet()
+  }
 }
 function closeSaveModal() {
   if (confirming.value) return
@@ -425,12 +508,18 @@ function startDrag(e, type, lineId, itemId = null) {
       }
     }
 
-    if (t === 'line-y' || t === 'line-body') {
-      // y 이동만, x 이동은 코드 절대위치 유지 (요청사항: 사이즈 움직여도 코드 위치 고정)
+    if (t === 'line-body') {
+      // 코드줄 전체 이동: xStart/xEnd/y를 함께 옮김.
+      // 아이템의 t(줄 안 상대위치)는 건드리지 않으므로, 프레임이 이동하면
+      // 코드들도 서로의 간격을 유지한 채 그대로 같이 이동한다.
+      const dx = pos.x - drag.value.startX
       const dy = pos.y - drag.value.startY
+      const width = drag.value.origXEnd - drag.value.origXStart
+      let newXStart = drag.value.origXStart + dx
+      newXStart = Math.max(0.005, Math.min(0.995 - width, newXStart))
+      line.xStart = newXStart
+      line.xEnd = newXStart + width
       line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
-      // x는 고정 - 코드 절대위치 보존 (이동시키고 싶으면 아래 2줄 주석 해제)
-      // const dx = pos.x - drag.value.startX ...
     } else if (t === 'line-h-top') {
       // 위 가장자리를 포인터 위치로 직접 맞춤 (더 직관적)
       const origBottom = drag.value.origY + drag.value.origHeight / 2
@@ -524,7 +613,16 @@ function onStageClick(e) {
 function onLineClick(e, line) {
   e.stopPropagation()
   const L = lines.value.find((x) => x.id === line.id) || line
+
+  // 코드를 삽입하려는 상태가 아닐 때만 다중 선택 토글을 적용
+  // (Shift+클릭 - 데스크톱 / 다중 선택 모드 토글 - 모바일)
+  if (!placeChord.value && (e.shiftKey || multiSelectMode.value)) {
+    toggleLineSelection(L.id)
+    return
+  }
+
   activeLineId.value = L.id
+  selectedLineIds.value = [] // 평범한 클릭은 다중 선택 해제하고 이 줄 하나만 대상으로
   if (!placeChord.value) return
   const pos = normFromEvent(e)
   if (!pos) return
@@ -576,7 +674,11 @@ function removeItem(line, itemId) {
   const L = lines.value.find(x => x.id === line.id)
   if (!L) return
   L.items = L.items.filter((it) => it.id !== itemId)
-  if (!L.items.length) lines.value = lines.value.filter((x) => x.id !== L.id)
+  if (!L.items.length) {
+    lines.value = lines.value.filter((x) => x.id !== L.id)
+    selectedLineIds.value = selectedLineIds.value.filter((id) => id !== L.id)
+    if (activeLineId.value === L.id) activeLineId.value = null
+  }
   saveLines()
 }
 function pickRoot(root) { 
@@ -830,27 +932,111 @@ const ocrStatusText = computed(() => {
 <template>
   <div class="editor">
     <div class="top-actions">
-      <button class="back" @click="emit('back')">← 목록</button>
+      <button class="back" @click="emit('back')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        목록
+      </button>
     </div>
     <div class="ocr-bar">
       <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">
         {{ ocrLoading ? (ocrHasRun ? '재실행 중...' : 'OCR 중...') : (ocrHasRun ? 'OCR 다시 실행' : 'OCR 실행') }}
       </button>
-      <span v-if="ocrLoading" class="ocr-status">
-        <span class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
-        {{ ocrStatusText }}
-      </span>
-      <span v-else-if="ocrError" class="ocr-error">{{ ocrError }}</span>
-      <span v-else-if="ocrHasRun" class="ocr-hint" style="color:#d00; font-weight:700;">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
-      <span v-else class="ocr-hint">업로드한 이미지에서 기타 코드를 자동으로 인식합니다</span>
-      <span v-if="message" class="msg" style="margin-left:8px">{{ message }}</span>
+      <div class="ocr-info">
+        <span v-if="ocrLoading" class="ocr-status">
+          <span class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
+          {{ ocrStatusText }}
+        </span>
+        <span v-else-if="ocrError" class="ocr-error">{{ ocrError }}</span>
+        <span v-else-if="ocrHasRun" class="ocr-hint warn">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
+        <span v-else class="ocr-hint">이미지에서 기타 코드를 찾아 표시합니다</span>
+        <span v-if="message" class="msg">{{ message }}</span>
+      </div>
     </div>
-    <div class="size-bar">
-      <span>코드 크기</span>
-      <button type="button" @click="bumpFont(-1)">A-</button>
-      <span class="size-val">{{ chordFontPx }}px</span>
-      <button type="button" @click="bumpFont(1)">A+</button>
-    </div>
+    <section class="edit-tools card">
+      <button type="button" class="tools-header" @click="toolsOpen = !toolsOpen">
+        <h4>Tools</h4>
+        <svg class="tools-chevron" :class="{ open: toolsOpen }" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+
+      <div class="tools-body" v-if="toolsOpen">
+        <div class="tool-line-block">
+          <div class="tlb-col">
+            <span class="tool-row-label">Line</span>
+            <div class="tlb-controls">
+              <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
+              <span class="tool-sep">/</span>
+              <div class="tool-btns">
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="tlb-col align-right">
+            <span class="ml-label">Multi</span>
+            <div class="tlb-controls">
+              <button
+                type="button"
+                class="ml-switch"
+                :class="{ on: multiSelectMode }"
+                role="switch"
+                :aria-checked="multiSelectMode"
+                @click="toggleMultiSelectMode"
+              >
+                <span class="ml-knob" />
+              </button>
+              <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
+            </div>
+          </div>
+        </div>
+        <p v-if="showLineHelp" class="help-text">PC는 Shift+클릭으로도 여러 줄을 선택할 수 있어요</p>
+        <p v-if="selectedLineIds.length > 1" class="ms-count">
+          {{ selectedLineIds.length }}개 선택됨
+          <button type="button" class="ms-clear" @click="clearLineSelection">해제</button>
+        </p>
+
+        <div class="tool-line-row">
+          <span class="tool-row-label">Chord</span>
+          <div class="tool-btns">
+            <button type="button" @click="bumpFont(-1)">A-</button>
+            <button type="button" @click="bumpFont(1)">A+</button>
+          </div>
+          <span class="tool-sep">/</span>
+          <div class="tool-btns">
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="roots">
+          <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
+        </div>
+        <div v-if="selectedRoot" class="variants">
+          <button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch }" @click="pickVariant(ch)">{{ ch }}</button>
+        </div>
+        <div class="custom-row">
+          <input v-model="customChord" placeholder="직접 입력" @keyup.enter="pickCustom" />
+          <button type="button" class="act" @click="pickCustom">선택</button>
+        </div>
+      </div>
+    </section>
     <div class="stage-frame" v-if="imageUrl">
     <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" @click="onStageClick">
       <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
@@ -873,7 +1059,7 @@ const ocrStatusText = computed(() => {
         v-for="line in displayLines"
         :key="line.id"
         class="chord-line"
-        :class="{ active: activeLineId === line.id }"
+        :class="{ active: isLineSelected(line.id) }"
         :style="lineStyle(line)"
         @click="onLineClick($event, line)"
         @pointerdown="onLineBodyDown($event, line)"
@@ -882,6 +1068,16 @@ const ocrStatusText = computed(() => {
         <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
         <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
         <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
+        <div class="move-hint" title="드래그해서 코드줄 전체 이동">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="5 9 2 12 5 15" />
+            <polyline points="9 5 12 2 15 5" />
+            <polyline points="15 19 12 22 9 19" />
+            <polyline points="19 9 22 12 19 15" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+            <line x1="12" y1="2" x2="12" y2="22" />
+          </svg>
+        </div>
         <div class="items-layer">
           <div
             v-for="item in line.items"
@@ -908,20 +1104,6 @@ const ocrStatusText = computed(() => {
       </div>
     </div>
     </div>
-    <section class="palette">
-      <h3>코드 선택</h3>
-      <div class="roots">
-        <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
-      </div>
-      <div v-if="selectedRoot" class="variants">
-        <button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch }" @click="pickVariant(ch)">{{ ch }}</button>
-      </div>
-      <div class="custom-row">
-        <input v-model="customChord" placeholder="직접 입력" @keyup.enter="pickCustom" />
-        <button type="button" class="act" @click="pickCustom">선택</button>
-        <button type="button" class="act ghost" @click="addEmptyLine">+ 새 줄</button>
-      </div>
-    </section>
     <section class="transpose" v-if="pageMode !== 'correct'">
       <h3>조옮김</h3>
       <div class="btns">
@@ -932,7 +1114,7 @@ const ocrStatusText = computed(() => {
         <button @click="doTranspose(2)" :disabled="saving">+2</button>
       </div>
     </section>
-    <button class="confirm" :disabled="confirming || !lines.length" @click="openSaveModal">
+    <button class="confirm" :disabled="confirming || !lines.length" @click="handleSaveClick">
       {{ confirming ? '저장 중…' : '저장' }}
     </button>
     <section v-if="pageMode !== 'correct' && resultUrl" class="result-section">
@@ -992,14 +1174,50 @@ const ocrStatusText = computed(() => {
 <style scoped>
 .editor { display: flex; flex-direction: column; gap: 1rem; max-width: 920px; margin: 0 auto; }
 .top-actions { display: flex; justify-content: space-between; align-items: center; }
-.back { background: none; border: none; cursor: pointer; color: #1a1a2e; }
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem 0.4rem 0.6rem;
+  border: 1px solid var(--border, #e2e6ef);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: var(--text, #1a1d26);
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.back svg {
+  color: var(--text-muted, #5c6578);
+  transition: transform 0.15s;
+}
+.back:hover {
+  border-color: #93c5fd;
+  background: var(--primary-soft, #eff4ff);
+}
+.back:hover svg {
+  transform: translateX(-2px);
+}
+.back:active {
+  transform: scale(0.97);
+}
 .meta { font-size: 0.85rem; color: #666; }
 .hint { font-size: 0.85rem; color: #444; background: #f5f7fa; padding: 0.6rem 0.8rem; border-radius: 6px; line-height: 1.5; }
-.ocr-bar { display: flex; gap: 0.6rem; align-items: center; padding: 0.6rem 0.8rem; background: #f0f6ff; border: 1px solid #c5d9ff; border-radius: 8px; flex-wrap: wrap; }
-.ocr-btn { padding: 0.5rem 0.9rem; background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; }
+.ocr-bar { display: flex; gap: 0.7rem; align-items: flex-start; padding: 0.6rem 0.8rem; background: #f0f6ff; border: 1px solid #c5d9ff; border-radius: 8px; }
+.ocr-btn { flex-shrink: 0; padding: 0.5rem 0.9rem; background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; white-space: nowrap; }
 .ocr-btn:disabled { opacity: 0.6; }
+.ocr-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 0.35rem;
+}
 .ocr-error { color: #c00; font-size: 0.85rem; }
-.ocr-hint { color: #555; font-size: 0.85rem; }
+.ocr-hint { color: #555; font-size: 0.85rem; line-height: 1.4; }
+.ocr-hint.warn { color: #d00; font-weight: 700; }
 .ocr-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #0d6efd; font-weight: 600; }
 .ocr-status-dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -1082,9 +1300,206 @@ const ocrStatusText = computed(() => {
 .dup-box { background: #fff8e6; border: 1px solid #e6c200; border-radius: 8px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
 .dup-box button { text-align: left; padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
 .dup-box .force { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
-.size-bar { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
-.size-bar button { padding: 0.25rem 0.55rem; border: 1px solid #ccc; border-radius: 5px; background: #fff; cursor: pointer; font-weight: 700; }
-.size-val { min-width: 2.5rem; text-align: center; font-weight: 600; }
+.edit-tools {
+  padding: 0;
+  overflow: hidden;
+}
+.tools-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.tools-header h4 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #1a1d26;
+}
+.tools-chevron {
+  color: #1a1d26;
+  transition: transform 0.15s;
+}
+.tools-chevron.open {
+  transform: rotate(180deg);
+}
+.tools-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0 1rem 1rem;
+  border-top: 1px solid var(--border, #e2e6ef);
+  padding-top: 0.85rem;
+}
+.tool-line-block {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 0.4rem 0.75rem;
+}
+.tlb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.tlb-col.align-right {
+  align-items: flex-end;
+}
+.tlb-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.tool-line-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.tool-row-label {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #475569;
+}
+.tool-sep {
+  color: #cbd5e1;
+  font-weight: 400;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+.mini-btn {
+  width: 2.1rem;
+  height: 2.1rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #1e293b;
+  line-height: 1;
+}
+.mini-btn:hover {
+  background: #eff4ff;
+  border-color: #93c5fd;
+}
+.tool-btns {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.tool-btns button {
+  width: 2.1rem;
+  height: 2.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  color: #1e293b;
+}
+.tool-btns button svg {
+  display: block;
+}
+.tool-btns button:hover:not(:disabled) {
+  background: #eff4ff;
+  border-color: #93c5fd;
+}
+.tool-btns button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.ml-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #334155;
+}
+.ml-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  border: none;
+  background: #cbd5e1;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ml-switch.on {
+  background: #0d6efd;
+}
+.ml-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+.ml-switch.on .ml-knob {
+  transform: translateX(16px);
+}
+.help-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #64748b;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.help-btn:hover {
+  border-color: #93c5fd;
+  color: #0d6efd;
+}
+.help-text {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #64748b;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+.ms-count {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0d6efd;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.ms-clear {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  color: #555;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
 .stage-frame {
   width: 100%;
   min-height: 360px;
@@ -1119,20 +1534,17 @@ const ocrStatusText = computed(() => {
   position: absolute;
   box-sizing: border-box;
   background: transparent;
-  border: none;
-  /* 기본은 거의 안 보이게, 호버/선택 시에만 얇은 선 */
-  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.12);
+  border: 1px solid transparent;
   border-radius: 2px;
   z-index: 2;
   min-height: 18px;
   cursor: grab;
 }
 .chord-line:hover {
-  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.28);
+  border-color: rgba(13, 110, 253, 0.4);
 }
 .chord-line.active {
-  background: rgba(0, 180, 255, 0.04);
-  box-shadow: inset 0 0 0 1px rgba(0, 160, 255, 0.4);
+  border: 1.5px solid #0d6efd;
 }
 .chord-line:active { cursor: grabbing; }
 /* 핸들이 두꺼운 파란 테두리처럼 보이던 원인 → 기본 투명, 호버 시에만 */
@@ -1145,7 +1557,7 @@ const ocrStatusText = computed(() => {
 .chord-line:hover .handle,
 .chord-line.active .handle {
   opacity: 1;
-  background: rgba(13, 110, 253, 0.2);
+  /* 배경 없음 - ::after 의 얇은 마커선만 표시 (넓은 반투명 밴드가 그림자처럼 보이는 문제 해결) */
 }
 .handle.left { left: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
 .handle.right { right: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
@@ -1157,12 +1569,12 @@ const ocrStatusText = computed(() => {
   position: absolute;
   left: 20%;
   right: 20%;
-  height: 3px;
+  height: 2px;
   top: 50%;
   transform: translateY(-50%);
-  background: #3b82f6;
+  background: #0d6efd;
   border-radius: 2px;
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .handle.left::after,
 .handle.right::after {
@@ -1170,14 +1582,28 @@ const ocrStatusText = computed(() => {
   position: absolute;
   top: 20%;
   bottom: 20%;
-  width: 3px;
+  width: 2px;
   left: 50%;
   transform: translateX(-50%);
-  background: #3b82f6;
+  background: #0d6efd;
   border-radius: 2px;
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .items-layer { position: absolute; inset: 0; pointer-events: none; }
+.move-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  color: #3b82f6;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.chord-line:hover .move-hint {
+  opacity: 0.35;
+}
 .chip {
   position: absolute;
   top: 50%;
@@ -1205,9 +1631,8 @@ const ocrStatusText = computed(() => {
 .chip .x { border: none; background: transparent; color: #a00; cursor: pointer; font-size: 0.9em; padding: 0 1px; opacity: 0.55; }
 .place-banner { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(13, 110, 253, 0.92); color: #fff; text-align: center; padding: 0.4rem; font-size: 0.9rem; z-index: 10; }
 .place-banner button { background: #fff; border: none; border-radius: 4px; padding: 2px 8px; margin-left: 6px; cursor: pointer; }
-.palette h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
 .roots { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-.root { width: 2.4rem; height: 2.4rem; border-radius: 50%; border: 2px solid #ccc; background: #fff; font-weight: 800; font-size: 1rem; cursor: pointer; }
+.root { width: 2.2rem; height: 2.2rem; border-radius: 50%; border: 2px solid #ccc; background: #fff; font-weight: 800; font-size: 0.95rem; cursor: pointer; }
 .root.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
 .variants { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.5rem; }
 .pchip { padding: 0.35rem 0.55rem; border: 1px solid #ccc; border-radius: 5px; background: #fff; font-weight: 600; font-size: 0.85rem; cursor: pointer; }

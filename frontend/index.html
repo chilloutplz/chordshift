@@ -2,7 +2,33 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
+
+    <!-- 파비콘 -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/icons/favicon-48x48.png" />
+
+    <!-- iOS 홈 화면 아이콘 -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+
+    <!-- PWA 매니페스트/서비스워커 등록은 vite-plugin-pwa가 빌드/개발 시 자동 주입 -->
+    <meta name="theme-color" content="#2563eb" />
+
+    <!-- iOS 웹앱 설정 -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ChordShift" />
+
+    <!-- iOS 스플래시 스크린 -->
+    <link
+      rel="apple-touch-startup-image"
+      href="/splash/splash-1284x2778-iphone.png"
+      media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+    />
+    <link rel="apple-touch-startup-image" href="/splash/splash-1080x1920.png" />
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ChordShift</title>
   </head>

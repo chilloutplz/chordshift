@@ -68,6 +68,15 @@ const currentLabel = ref('')
 // 가운데 "원곡(코드)" 버튼 라벨 - 항상 원본(0반음) 기준, 현재 위치와 무관하게 고정
 const originLabel = computed(() => `원곡(${keyLabel(props.sheet.chords || [], 0)})`)
 
+// "(C→E)" 부분만 - 0일 땐 빈 문자열 (원곡 버튼이 이미 원곡임을 보여주므로)
+const transposeLabel = computed(() => {
+  if (!semitones.value) return ''
+  const base = firstChordName(props.sheet.chords || [])
+  const fromRoot = rootOnly(base)
+  const toRoot = rootOnly(transposeChordName(base, semitones.value))
+  return `(${fromRoot}→${toRoot})`
+})
+
 watch(
   () => props.sheet,
   (s) => {
@@ -226,17 +235,18 @@ async function deleteSong() {
 <template>
   <div class="page">
     <div class="top">
-      <button type="button" class="link" @click="emit('back')">← 목록</button>
-      <button type="button" class="link" @click="emit('edit')">보정으로</button>
-      <button type="button" class="link danger" :disabled="deleting" @click="deleteSong">
-        {{ deleting ? '삭제 중…' : '삭제' }}
+      <button type="button" class="back-btn" @click="emit('back')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        목록
       </button>
     </div>
 
     <h2>{{ sheet.title || '제목 없음' }}</h2>
 
     <section class="transpose card">
-      <h3>조옮김</h3>
+      <h3>조옮김 <span class="transpose-label" v-if="transposeLabel">{{ transposeLabel }}</span></h3>
       <div class="btns">
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(-2)">−2</button>
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
@@ -250,16 +260,17 @@ async function deleteSong() {
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(1)">+1</button>
         <button type="button" class="step" :disabled="rendering" @click="doTranspose(2)">+2</button>
       </div>
-      <p class="cur-status" v-if="semitones !== 0">
-        현재 {{ semitones > 0 ? '+' : '' }}{{ semitones }} · {{ currentLabel }}
-      </p>
-      <p class="preview" v-if="previewChords.length">
-        미리보기: {{ previewChords.slice(0, 12).join(' · ') }}{{ previewChords.length > 12 ? ' …' : '' }}
-      </p>
-      <p class="hint muted">조옮김할 때마다 원본에서 바로 그립니다. 서버에 결과 이미지를 저장하지 않습니다.</p>
+      <div class="preview-chords" v-if="previewChords.length">
+        <span v-for="(c, i) in previewChords.slice(0, 12)" :key="i" class="preview-chip">{{ c }}</span>
+        <span v-if="previewChords.length > 12" class="preview-more">…</span>
+      </div>
     </section>
 
     <div class="actions">
+      <button type="button" class="btn-edit" @click="emit('edit')">수정</button>
+      <button type="button" class="btn-delete" :disabled="deleting" @click="deleteSong">
+        {{ deleting ? '삭제 중…' : '삭제' }}
+      </button>
       <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
         다운로드
       </button>
@@ -301,25 +312,33 @@ async function deleteSong() {
   gap: 0.75rem;
   align-items: center;
 }
-.link {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: #2563eb;
+.back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem 0.4rem 0.6rem;
+  border: 1px solid var(--border, #e2e6ef);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: var(--text, #1a1d26);
   font-weight: 600;
-  padding: 0;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
 }
-.link:hover {
-  text-decoration: underline;
+.back-btn svg {
+  color: var(--text-muted, #5c6578);
+  transition: transform 0.15s;
 }
-.link.danger {
-  color: #dc2626;
-  margin-left: auto;
+.back-btn:hover {
+  border-color: #93c5fd;
+  background: var(--primary-soft, #eff4ff);
 }
-.link:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  text-decoration: none;
+.back-btn:hover svg {
+  transform: translateX(-2px);
+}
+.back-btn:active {
+  transform: scale(0.97);
 }
 h2 {
   margin: 0;
@@ -364,24 +383,61 @@ h2 {
   background: #0a5c55;
   box-shadow: inset 0 0 0 2px #6ee7d5;
 }
-.cur-status {
-  margin: 0.5rem 0 0;
+.transpose-label {
   font-size: 0.85rem;
-  color: #4b5563;
+  font-weight: 700;
+  color: #0f766e;
 }
-.preview {
-  margin: 0.4rem 0 0;
-  font-size: 0.88rem;
-  color: #4b5563;
-}
-.hint {
+.preview-chords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
   margin: 0.55rem 0 0;
-  font-size: 0.8rem;
+}
+.preview-chip {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #818cf8;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.preview-more {
+  align-self: center;
+  color: #cbd5e1;
+  font-size: 0.82rem;
 }
 .actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.btn-edit,
+.btn-delete {
+  padding: 0.7rem 1.1rem;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+  background: #fff;
+}
+.btn-edit {
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+}
+.btn-edit:hover {
+  background: #f1f5f9;
+}
+.btn-delete {
+  border: 1px solid #fca5a5;
+  color: #dc2626;
+}
+.btn-delete:hover {
+  background: #fef2f2;
+}
+.btn-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .btn-dl {
   padding: 0.7rem 1.1rem;

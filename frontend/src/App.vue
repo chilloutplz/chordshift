@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import HomePage from './components/HomePage.vue'
 import ChordEditor from './components/ChordEditor.vue'
 import TransposePage from './components/TransposePage.vue'
+import HelpPage from './components/HelpPage.vue'
 import { apiFetch } from './api/api.js'
 
 /**
@@ -16,6 +17,7 @@ const COFFEE_URL = 'https://www.buymeacoffee.com/chordshift'
 const page = ref('home')
 const currentSheet = ref(null)
 const ocrUsage = ref(null)
+const previousPage = ref('home') // 도움말 진입 전 화면 - 도움말에서 뒤로가면 여기로 복귀
 
 async function loadOcrUsage() {
   try {
@@ -36,6 +38,14 @@ function onUpdated(sheet) {
   currentSheet.value = sheet
   if (sheet?.ocr_usage) ocrUsage.value = sheet.ocr_usage
   else loadOcrUsage()
+}
+
+function openHelp() {
+  previousPage.value = page.value
+  page.value = 'help'
+}
+function closeHelp() {
+  page.value = previousPage.value
 }
 
 function backHome() {
@@ -60,7 +70,7 @@ onMounted(loadOcrUsage)
   <div class="app">
     <header class="topbar">
       <button type="button" class="brand" @click="backHome" :title="page !== 'home' ? '홈으로' : ''">
-        <span class="logo" aria-hidden="true">♪</span>
+        <img src="/icons/icon-96x96.png" alt="" class="logo" width="38" height="38" />
         <span class="brand-text">
           <span class="name">ChordShift</span>
           <span class="tag">기타 악보 OCR · 조옮김</span>
@@ -68,6 +78,7 @@ onMounted(loadOcrUsage)
       </button>
 
       <div class="topbar-actions">
+        <button type="button" class="help-link" title="사용법" aria-label="사용법" @click="openHelp">?</button>
         <div
           v-if="ocrUsage"
           class="ocr-badge"
@@ -97,6 +108,7 @@ onMounted(loadOcrUsage)
         @back="backHome"
         @edit="goCorrect"
       />
+      <HelpPage v-else-if="page === 'help'" @back="closeHelp" />
     </main>
 
     <footer class="foot">
@@ -107,14 +119,8 @@ onMounted(loadOcrUsage)
         rel="noopener noreferrer"
         title="Uncle Bob"
       >
-        <span>2026 Uncle Bob</span>
-        <img 
-          src="/coffee/coffee-24.png" 
-          alt="coffee" 
-          class="coffee-icon"
-          width="20"
-          height="20"
-        />
+        <img src="/coffee/coffee-48.png" alt="" class="coffee-icon" width="18" height="18" />
+        2026 Uncle Bob
       </a>
     </footer>
   </div>
@@ -157,15 +163,9 @@ onMounted(loadOcrUsage)
   width: 2.4rem;
   height: 2.4rem;
   border-radius: 10px;
-  background: linear-gradient(145deg, #2563eb, #0f766e);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.15rem;
-  font-weight: 700;
   flex-shrink: 0;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+  display: block;
 }
 .brand-text {
   display: flex;
@@ -190,6 +190,29 @@ onMounted(loadOcrUsage)
   align-items: center;
   gap: 0.5rem;
   flex-shrink: 0;
+}
+
+.help-link {
+  width: 1.85rem;
+  height: 1.85rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong, #c8d0e0);
+  background: var(--surface, #fff);
+  color: var(--text-muted, #5c6578);
+  font-weight: 800;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.help-link:hover {
+  border-color: var(--primary, #2563eb);
+  color: var(--primary, #2563eb);
+  background: var(--primary-soft, #eff4ff);
 }
 
 .ocr-badge {
@@ -240,29 +263,26 @@ onMounted(loadOcrUsage)
 }
 
 .credit {
-  font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
   color: #7a8294;
   text-decoration: none;
   letter-spacing: 0.01em;
-  font-weight: 1000;
-  transition: color 0.15s;
+  font-weight: 500;
+  transition: color 0.15s, opacity 0.15s;
 }
 .credit:hover {
   color: #5c6578;
 }
-
-.foot .credit {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px; /* 글자랑 아이콘 사이 간격 */
-  text-decoration: none;
-}
-
 .coffee-icon {
-  display: inline-block;
-  object-fit: contain;
-  /* 파란 배경 푸터면 흰색 버전이 더 잘 보여! */
-  /* filter: brightness(0) invert(1);  <- 필요하면 주석 해제 */
+  display: block;
+  opacity: 0.85;
+  transition: opacity 0.15s;
+}
+.credit:hover .coffee-icon {
+  opacity: 1;
 }
 
 @media (max-width: 480px) {
