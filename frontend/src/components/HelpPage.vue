@@ -1,7 +1,3 @@
-<script setup>
-const emit = defineEmits(['back'])
-</script>
-
 <template>
   <div class="help">
     <div class="help-head">
@@ -20,12 +16,7 @@ const emit = defineEmits(['back'])
           <li>홈 화면에서 <strong>업로드</strong> 또는 검색창 옆 버튼으로 이미지를 선택합니다.</li>
           <li>휴대폰으로 찍은 사진, 캡처 화면 모두 가능합니다.</li>
           <li>가능하면 <strong>코드가 잘 보이는 밝은 사진</strong>을 올려 주세요. (기울기·그림자는 OCR 정확도에 영향을 줍니다.)</li>
-          <li>검색과 관리에 편리하도록 제목을 입력하여 저장합니다.</li>
-          <li>같은 제목으로 저장 할 수 있습니다.</li>
-          <ul>
-            <li>기존 곡에 덮어쓰기 : 더 나은 악보로 교체하고자 할 때 </li>
-            <li>새 곡으로 저장 : 제목만 같고 다른 곡일 때 </li>
-          </ul>
+          <li>제목을 미리 입력해 두면 저장 시 편합니다.</li>
         </ul>
       </div>
     </section>
@@ -111,12 +102,6 @@ const emit = defineEmits(['back'])
         <li>개인·팀용 도구로, 계정 로그인 없이 동작합니다. 공유·백업이 필요하면 별도 관리해 주세요.</li>
       </ul>
     </section>
-
-    <div class="help-actions">
-      <button type="button" class="btn btn-primary" @click="emit('back')">
-        ← 이전 화면으로
-      </button>
-    </div>
   </div>
 </template>
 
@@ -224,34 +209,6 @@ const emit = defineEmits(['back'])
   background: #fef2f2;
   border-color: #fca5a5;
   color: #b91c1c;
-}
-
-.help-actions {
-  display: flex;
-  justify-content: center;
-  padding: 0.75rem 0 0.25rem;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
-  padding: 0.65rem 1.25rem;
-  border: none;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 0.95rem;
-  cursor: pointer;
-}
-
-.btn-primary {
-  background: var(--primary, #2563eb);
-  color: #fff;
-}
-
-.btn-primary:hover {
-  background: var(--primary-hover, #1d4ed8);
 }
 
 @media (max-width: 480px) {

@@ -18,6 +18,10 @@ const page = ref('home')
 const currentSheet = ref(null)
 const ocrUsage = ref(null)
 const previousPage = ref('home') // 도움말 진입 전 화면 - 도움말에서 뒤로가면 여기로 복귀
+// ChordEditor에서 뒤로가기 눌렀을 때 갈 곳.
+// 신규 업로드(temp)로 들어온 거면 아직 저장된 곡이 없어 'home'으로,
+// 이미 저장된 곡을 "수정"으로 들어온 거면 'transpose'로 돌아간다.
+const editorBackTarget = ref('home')
 
 async function loadOcrUsage() {
   try {
@@ -29,9 +33,14 @@ async function loadOcrUsage() {
 function openSheet(sheet) {
   currentSheet.value = sheet
   // 새 업로드(임시) → 보정 화면 / 목록에서 고른 저장곡 → 조옮김 화면
-  // 조옮김에서 「보정으로」링크 → 보정 화면 (goCorrect)
+  // 조옮김에서 「수정」버튼 → 보정 화면 (goCorrect)
   const isTemp = !!(sheet.is_temp || sheet.temp_id)
-  page.value = isTemp ? 'correct' : 'transpose'
+  if (isTemp) {
+    editorBackTarget.value = 'home'
+    page.value = 'correct'
+  } else {
+    page.value = 'transpose'
+  }
 }
 
 function onUpdated(sheet) {
@@ -54,12 +63,22 @@ function backHome() {
   loadOcrUsage()
 }
 
+// ChordEditor의 뒤로가기 - 진입 경로에 따라 조옮김 화면 또는 홈으로
+function backFromEditor() {
+  if (editorBackTarget.value === 'transpose' && currentSheet.value) {
+    page.value = 'transpose'
+  } else {
+    backHome()
+  }
+}
+
 function goTranspose(sheet) {
   if (sheet) currentSheet.value = sheet
   page.value = 'transpose'
 }
 
 function goCorrect() {
+  editorBackTarget.value = 'transpose'
   page.value = 'correct'
 }
 
@@ -78,7 +97,18 @@ onMounted(loadOcrUsage)
       </button>
 
       <div class="topbar-actions">
-        <button type="button" class="help-link" title="사용법" aria-label="사용법" @click="openHelp">?</button>
+        <button
+          type="button"
+          class="help-link"
+          :title="page === 'help' ? '뒤로' : '사용법'"
+          :aria-label="page === 'help' ? '뒤로' : '사용법'"
+          @click="page === 'help' ? closeHelp() : openHelp()"
+        >
+          <svg v-if="page === 'help'" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span v-else>?</span>
+        </button>
         <div
           v-if="ocrUsage"
           class="ocr-badge"
@@ -96,9 +126,8 @@ onMounted(loadOcrUsage)
       <ChordEditor
         v-else-if="page === 'correct' && currentSheet"
         :sheet="currentSheet"
-        page-mode="correct"
         @updated="onUpdated"
-        @back="backHome"
+        @back="backFromEditor"
         @next="goTranspose"
       />
       <TransposePage
@@ -108,7 +137,7 @@ onMounted(loadOcrUsage)
         @back="backHome"
         @edit="goCorrect"
       />
-      <HelpPage v-else-if="page === 'help'" @back="closeHelp" />
+      <HelpPage v-else-if="page === 'help'" />
     </main>
 
     <footer class="foot">

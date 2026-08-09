@@ -4,7 +4,6 @@ import { API_BASE, apiFetch } from '@/api/api.js'
 
 const props = defineProps({
   sheet: { type: Object, required: true },
-  pageMode: { type: String, default: 'correct' }, // correct | full
 })
 const emit = defineEmits(['updated', 'back', 'next'])
 
@@ -20,7 +19,6 @@ const VARIANTS = {
 }
 
 const lines = ref([])
-const semitones = ref(0)
 const saving = ref(false)
 const confirming = ref(false)
 const message = ref('')
@@ -29,8 +27,6 @@ const ocrError = ref('')
 // OCR 큐 대기 정보 - { status: 'queued'|'processing', aheadCount, estimatedWaitSeconds }
 const ocrQueueInfo = ref(null)
 // 이 시트에 대해 OCR을 이미 한 번이라도 실행한 적 있는지
-// - 열었을 때 이미 인식된 코드/원문이 있으면 재실행으로 간주 (예: 저장 후 다시 들어온 경우)
-// - 처음 업로드해서 아직 OCR 안 돌린 상태면 false
 const ocrHasRun = ref(!!(props.sheet.chords?.length || props.sheet.ocr_raw_text))
 const editKey = ref(null)
 const editValue = ref('')
@@ -42,11 +38,34 @@ const drag = ref(null)
 const chordFontPx = ref(13)
 const selectedRoot = ref(null)
 
-// --- 코드줄 다중 선택 (Shift+클릭, 모바일은 "다중 선택" 토글) ---
+// --- 하단 도구 탭: 배치(코드 고르기) / 조정(이동·크기) ---
+const bottomTab = ref('place')
+
+// --- 캔버스 확대/축소 (모바일에서 정밀 배치용) ---
+const zoom = ref(1)
+const ZOOM_MIN = 1
+const ZOOM_MAX = 2.5
+const ZOOM_STEP = 0.25
+function zoomIn() {
+  zoom.value = Math.min(ZOOM_MAX, +(zoom.value + ZOOM_STEP).toFixed(2))
+}
+function zoomOut() {
+  zoom.value = Math.max(ZOOM_MIN, +(zoom.value - ZOOM_STEP).toFixed(2))
+}
+// 좌표 계산(normFromEvent)은 실제 렌더된 stage 크기를 기준으로 하므로
+// 확대해도 드래그/클릭 위치 계산은 그대로 정확하게 맞는다.
+const stageStyle = computed(() => {
+  if (zoom.value <= 1) return {}
+  return { width: `${zoom.value * 100}%`, maxWidth: 'none' }
+})
+// 화면에 보여줄 코드 글자 크기 = 저장용 기준 크기 × 확대 배율.
+// (서버에 저장되는 chordFontPx 자체는 건드리지 않고, 화면 표시만 확대에 맞춰 커짐)
+const displayFontPx = computed(() => Math.round(chordFontPx.value * zoom.value))
+
+// --- 코드줄 다중 선택 (Shift+클릭, 모바일은 "Multi" 토글) ---
 const multiSelectMode = ref(false)
 const selectedLineIds = ref([])
 const showLineHelp = ref(false) // Shift+클릭 안내를 기본적으로 숨기고 ? 버튼으로만 노출
-const toolsOpen = ref(true) // Tools 패널 접기/펼치기
 
 // 이동/좌우 툴이 실제로 작동할 대상 줄 id 목록.
 // 다중 선택된 게 있으면 그것들, 없으면 현재 활성(activeLineId) 하나.
@@ -78,9 +97,9 @@ function clearLineSelection() {
   selectedLineIds.value = []
 }
 
-// --- 코드줄 이동 / 코드만 좌우 이동 툴 (버튼식, 폰트 크기 조절 툴과 동일한 방식) ---
-const LINE_NUDGE_STEP = 0.006 // 줄 전체 이동 간격
-const CHORD_NUDGE_STEP = 0.01 // 코드만 좌우 이동 간격
+// --- 코드줄 이동 / 코드만 좌우 이동 툴 ---
+const LINE_NUDGE_STEP = 0.006
+const CHORD_NUDGE_STEP = 0.01
 
 function targetLines() {
   const ids = targetLineIds.value
@@ -177,22 +196,6 @@ function saveAsNewAnyway() {
   confirmSheet()
 }
 
-
-function keyLabelFromLines(linesArr, semitones = 0) {
-  const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-  const map = Object.fromEntries(NOTES.map((n,i)=>[n,i]))
-  map['Db']=1; map['Eb']=3; map['Gb']=6; map['Ab']=8; map['Bb']=10
-  let name = 'C'
-  if (Array.isArray(linesArr) && linesArr[0]?.items?.[0]?.chord) name = linesArr[0].items[0].chord
-  const m = String(name).match(/^([A-Ga-g])([#b]?)/)
-  if (!m) return 'C코드'
-  const root = m[1].toUpperCase() + (m[2] || '')
-  const idx = map[root]
-  if (idx === undefined) return `${root}코드`
-  const out = NOTES[(idx + (semitones % 12) + 12) % 12]
-  return `${out}코드`
-}
-
 function isTemp() {
   return !!(props.sheet.is_temp || props.sheet.temp_id)
 }
@@ -206,7 +209,12 @@ async function runOcr() {
     ocrError.value = '임시 ID가 없습니다. 다시 업로드하세요.'
     return
   }
-  const isRerun = ocrHasRun.value  // 이번 호출이 재실행인지 시작 시점에 미리 기억
+  // 재실행이면 기존 수정 내용이 사라진다는 걸 명확히 확인받고 진행
+  if (ocrHasRun.value) {
+    const ok = window.confirm('OCR을 다시 실행하면 지금까지 수정한 코드 내용이 모두 사라집니다.\n계속할까요?')
+    if (!ok) return
+  }
+  const isRerun = ocrHasRun.value
   ocrLoading.value = true
   ocrError.value = ''
   ocrQueueInfo.value = null
@@ -255,7 +263,7 @@ async function runOcr() {
     if (chords && chords.length) {
       lines.value = toLines(chords)
       message.value = isRerun
-        ? `OCR 재실행 완료: ${chords.length}개 라인 인식 (기존 수정 내용은 대체되었습니다)`
+        ? `OCR 재실행 완료: ${chords.length}개 라인 인식`
         : `OCR 완료: ${chords.length}개 라인 인식`
       ocrHasRun.value = true
       emit('updated', { ...props.sheet, chords })
@@ -273,28 +281,6 @@ async function runOcr() {
   }
 }
 
-
-const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-const NOTE_IDX = Object.fromEntries(NOTES.map((n,i)=>[n,i]))
-NOTE_IDX['Db']=1; NOTE_IDX['Eb']=3; NOTE_IDX['Fb']=4; NOTE_IDX['Gb']=6
-NOTE_IDX['Ab']=8; NOTE_IDX['Bb']=10; NOTE_IDX['Cb']=11; NOTE_IDX['E#']=5; NOTE_IDX['B#']=0
-
-function transposeChordName(name, semitones) {
-  if (!name || !semitones) return name
-  const s = String(name).trim()
-  if (s.includes('/')) {
-    return s.split('/').map(p => transposeChordName(p, semitones)).join('/')
-  }
-  const m = s.match(/^([A-Ga-g])([#b]?)(.*)$/)
-  if (!m) return s
-  const root = m[1].toUpperCase() + (m[2] || '')
-  const idx = NOTE_IDX[root]
-  if (idx === undefined) return s
-  const newRoot = NOTES[(idx + semitones % 12 + 12) % 12]
-  return newRoot + (m[3] || '')
-}
-
-
 function ensureItemT(items) {
   const n = Math.max(items.length, 1)
   return items.map((it, i) => {
@@ -307,7 +293,6 @@ function ensureItemT(items) {
     return base
   })
 }
-
 
 function toLines(raw) {
   if (!Array.isArray(raw) || !raw.length) return []
@@ -331,13 +316,9 @@ function toLines(raw) {
   }
 
   // === 절대좌표 모드 ===
-  // raw = [{chord/text, x, y}] 형태
-  // x,y가 픽셀 좌표면 그대로 %로 변환해서 한 줄씩 쪼개지 않고 y로만 그룹핑
-  // 저장된 y가 있으면 절대 덮어쓰지 않음 - 사용자 드래그 위치 유지
-  const W = 750 // 악보 이미지 예상 폭
-  const H = 1100 // 예상 높이
+  const W = 750
+  const H = 1100
 
-  // 엣지 노이즈 제거: 왼쪽 5% 오른쪽 5% 밖은 버림
   const filtered = raw.filter(c => {
     if (typeof c === 'string') return true
     const x = c.x ?? 0
@@ -387,10 +368,8 @@ function toLines(raw) {
   })
 }
 
-
 watch(() => props.sheet, (s) => {
   lines.value = toLines(s.chords)
-  semitones.value = s.transpose_semitones || 0
   ocrHasRun.value = !!(s.chords?.length || s.ocr_raw_text)
   if (s.chord_font_size) {
     chordFontPx.value = s.chord_font_size
@@ -399,25 +378,12 @@ watch(() => props.sheet, (s) => {
   }
 }, { immediate: true })
 
-const displayLines = computed(() => {
-  const delta = semitones.value || 0
-  return lines.value.map(L => ({
-    ...L,
-    items: (L.items || []).map(it => ({
-      ...it,
-      chord: delta ? transposeChordName(it.chord, delta) : it.chord,
-    })),
-  }))
-})
-
-
 const paletteChords = computed(() => {
   if (!selectedRoot.value) return []
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
 
 function lineStyle(line) {
-  // y = 코드줄 세로 중앙, height = 띠 높이 (정규화 0~1)
   const h = Math.max(line.height || 0.028, 0.015)
   const y = line.y ?? 0.1
   return {
@@ -429,7 +395,6 @@ function lineStyle(line) {
 }
 
 function chordLeftPct(line, item) {
-  // t = 줄 안 상대 위치 (0~1). 보정 배율 없이 그대로 표시
   if (typeof item.t !== 'number' || Number.isNaN(item.t)) return '50%'
   return `${Math.min(98, Math.max(2, item.t * 100))}%`
 }
@@ -448,14 +413,12 @@ function normFromEvent(e) {
 }
 
 function startDrag(e, type, lineId, itemId = null) {
-  // 코드 선택(삽입) 중에는 드래그보다 클릭 삽입 우선
   if (placeChord.value) return
   e.preventDefault()
   e.stopPropagation()
   activeLineId.value = lineId
   const line0 = lines.value.find((L) => L.id === lineId)
   const pos0 = normFromEvent(e)
-  // 코드 드래그 시: 클릭 지점과 코드 중앙의 차이를 보존 (선택 순간 점프 방지)
   let chordGrabOffset = 0
   let origChordT = 0.5
   if (type === 'chord-x' && line0 && itemId) {
@@ -489,7 +452,6 @@ function startDrag(e, type, lineId, itemId = null) {
     const line = lines.value.find((L) => L.id === drag.value.lineId)
     if (!line) return
     const t = drag.value.type
-    // 절대 위치 보존을 위한 원본 절대 x 저장 (최초 드래그 시작 시)
     if (!drag.value.origAbs) {
       const span0 = drag.value.origXEnd - drag.value.origXStart
       drag.value.origAbs = (line.items || []).map(it => {
@@ -509,9 +471,6 @@ function startDrag(e, type, lineId, itemId = null) {
     }
 
     if (t === 'line-body') {
-      // 코드줄 전체 이동: xStart/xEnd/y를 함께 옮김.
-      // 아이템의 t(줄 안 상대위치)는 건드리지 않으므로, 프레임이 이동하면
-      // 코드들도 서로의 간격을 유지한 채 그대로 같이 이동한다.
       const dx = pos.x - drag.value.startX
       const dy = pos.y - drag.value.startY
       const width = drag.value.origXEnd - drag.value.origXStart
@@ -521,13 +480,11 @@ function startDrag(e, type, lineId, itemId = null) {
       line.xEnd = newXStart + width
       line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
     } else if (t === 'line-h-top') {
-      // 위 가장자리를 포인터 위치로 직접 맞춤 (더 직관적)
       const origBottom = drag.value.origY + drag.value.origHeight / 2
       const newTop = Math.min(origBottom - 0.012, Math.max(0.005, pos.y))
       line.height = Math.max(0.012, origBottom - newTop)
       line.y = (newTop + origBottom) / 2
     } else if (t === 'line-h-bottom') {
-      // 아래 가장자리를 포인터 위치로 직접 맞춤
       const origTop = drag.value.origY - drag.value.origHeight / 2
       const newBottom = Math.max(origTop + 0.012, Math.min(0.995, pos.y))
       line.height = Math.max(0.012, newBottom - origTop)
@@ -546,7 +503,6 @@ function startDrag(e, type, lineId, itemId = null) {
       if (!item) return
       const span = line.xEnd - line.xStart
       if (span <= 0.001) return
-      // 포인터 - 클릭오프셋 = 코드 중앙이 되어야 할 절대 x
       const centerAbs = pos.x - (drag.value.chordGrabOffset || 0)
       const nt = (centerAbs - line.xStart) / span
       item.t = Math.min(0.98, Math.max(0.02, nt))
@@ -587,11 +543,11 @@ function onStageClick(e) {
     if (!target) return
     const span = (target.xEnd - target.xStart) || 0.8
     const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - target.xStart) / span))
-    target.items.push({ 
-      id: 'n' + Date.now().toString(36), 
-      chord: ch, 
+    target.items.push({
+      id: 'n' + Date.now().toString(36),
+      chord: ch,
       t: tNorm,
-      manual: true // 클릭 무보정 표시
+      manual: true
     })
     activeLineId.value = target.id
     message.value = `"${ch}" 코드줄에 삽입`
@@ -614,15 +570,13 @@ function onLineClick(e, line) {
   e.stopPropagation()
   const L = lines.value.find((x) => x.id === line.id) || line
 
-  // 코드를 삽입하려는 상태가 아닐 때만 다중 선택 토글을 적용
-  // (Shift+클릭 - 데스크톱 / 다중 선택 모드 토글 - 모바일)
   if (!placeChord.value && (e.shiftKey || multiSelectMode.value)) {
     toggleLineSelection(L.id)
     return
   }
 
   activeLineId.value = L.id
-  selectedLineIds.value = [] // 평범한 클릭은 다중 선택 해제하고 이 줄 하나만 대상으로
+  selectedLineIds.value = []
   if (!placeChord.value) return
   const pos = normFromEvent(e)
   if (!pos) return
@@ -664,7 +618,6 @@ function confirmEdit(lineId, item) {
   const L = lines.value.find(x => x.id === lineId)
   const it = L?.items?.find(x => x.id === item.id)
   if (it) {
-    // 표시가 조옮김된 값이면 역산하지 않고 사용자가 입력한 값을 원본으로 저장
     it.chord = editValue.value.trim() || it.chord
   }
   editKey.value = null
@@ -681,21 +634,21 @@ function removeItem(line, itemId) {
   }
   saveLines()
 }
-function pickRoot(root) { 
+function pickRoot(root) {
   selectedRoot.value = root
   const list = VARIANTS[root] || [root]
   placeChord.value = list[0] || root
-  message.value = `"${placeChord.value}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
+  message.value = `"${placeChord.value}" 선택 · 코드줄 탭해서 삽입`
 }
 function pickVariant(ch) {
   placeChord.value = ch
-  message.value = `"${ch}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
+  message.value = `"${ch}" 선택 · 코드줄 탭해서 삽입`
 }
 function pickCustom() {
   const ch = customChord.value.trim()
   if (!ch) return
   placeChord.value = ch
-  message.value = `"${ch}" 선택 · 코드줄 클릭 삽입 (Esc 취소)`
+  message.value = `"${ch}" 선택 · 코드줄 탭해서 삽입`
 }
 function clearPlace() { placeChord.value = ''; message.value = '' }
 
@@ -730,9 +683,9 @@ async function saveLines() {
   saving.value = true
   try {
     let res
-    const payload = { 
+    const payload = {
       chords: lines.value,
-      chord_font_size: chordFontPx.value // 이거 추가
+      chord_font_size: chordFontPx.value
     }
     if (isTemp()) {
       res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
@@ -753,55 +706,6 @@ async function saveLines() {
   } catch (e) { message.value = e.message }
   finally { saving.value = false }
 }
-
-async function doTranspose(delta) {
-  // 보정 화면 미리보기용 (원본 lines 유지)
-  semitones.value = (semitones.value || 0) + delta
-  message.value = `조옮김 미리보기 ${semitones.value > 0 ? '+' : ''}${semitones.value}`
-}
-
-async function saveBase(mergeSongId = null, forceNew = false) {
-  saving.value = true
-  message.value = ''
-  dupCandidates.value = []
-  try {
-    if (isTemp()) {
-      const body = {
-        temp_id: sheetId(),
-        title: props.sheet.title || '',
-        chords: lines.value,
-        chord_font_size: chordFontPx.value,
-        force_new: forceNew,
-      }
-      if (mergeSongId) body.merge_song_id = mergeSongId
-      const res = await apiFetch('/api/songs/from-temp/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (res.status === 409 && data.error === 'duplicate_title') {
-        dupCandidates.value = data.candidates || []
-        message.value = data.message || '같은 제목의 곡이 있습니다'
-        return
-      }
-      if (!res.ok) throw new Error(data.error || '보정본 저장 실패')
-      emit('updated', { ...data, is_temp: false })
-      message.value = '보정본 저장됨 (DB 등록)'
-    } else {
-      const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chords: lines.value }),
-      })
-      if (!res.ok) throw new Error('저장 실패')
-      emit('updated', await res.json())
-      message.value = '보정본 저장됨'
-    }
-  } catch (e) { message.value = e.message }
-  finally { saving.value = false }
-}
-
 
 async function confirmSheet(mergeId = null) {
   confirming.value = true
@@ -827,7 +731,6 @@ async function confirmSheet(mergeId = null) {
       })
       const data = await res.json().catch(() => ({}))
       if (res.status === 409 && data.error === 'duplicate_title') {
-        // 조용히 새 곡으로 만들지 않고, 사용자가 직접 "덮어쓰기" 또는 "새 곡으로 저장"을 선택하게 함
         dupCandidates.value = data.candidates || []
         saveTitleError.value = data.message || `"${titleToSave}" 제목의 곡이 이미 있습니다.`
         showSaveModal.value = true
@@ -836,7 +739,6 @@ async function confirmSheet(mergeId = null) {
       if (!res.ok) {
         throw new Error(data.error || data.message || '보정본 저장 실패. migrate / 서버 재시작을 확인하세요.')
       }
-      // 서버 응답의 이미지 URL 유지 (temp URL 덮어쓰지 않음)
       song = {
         ...song,
         ...data,
@@ -871,7 +773,6 @@ async function confirmSheet(mergeId = null) {
     dupCandidates.value = []
     forceNewOnDuplicate.value = false
     showSaveModal.value = false
-    // 온디맨드 렌더: 저장 시 variant 이미지 저장하지 않음. 조옮김 화면에서 실시간 생성.
     message.value = '저장됨 · 조옮김 단계로 이동'
     emit('next', song)
   } catch (e) {
@@ -890,7 +791,6 @@ const imageUrl = computed(() => {
   if (!u) return ''
   if (typeof u === 'object' && u.url) u = u.url
   u = String(u)
-  // data URL 은 그대로
   if (u.startsWith('data:')) return u
   if (u.startsWith('/')) u = `${API_BASE}${u}`
   if (u.includes('127.0.0.1') || u.includes('localhost')) {
@@ -900,17 +800,6 @@ const imageUrl = computed(() => {
   }
   const bust = props.sheet.updated_at || Date.now()
   return u + (u.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(bust)
-})
-const resultUrl = computed(() => {
-  let u = props.sheet.result_image || ''
-  if (!u) return ''
-  if (u.startsWith('/')) u = `${API_BASE}${u}`
-  if (u.includes('127.0.0.1') || u.includes('localhost')) {
-    u = u.replace('https://', 'http://')
-  } else if (u.startsWith('http://') && API_BASE.startsWith('https://')) {
-    u = u.replace('http://', 'https://')
-  }
-  return u + (u.includes('?') ? '&' : '?') + 't=' + (props.sheet.updated_at || Date.now())
 })
 
 const ocrStatusText = computed(() => {
@@ -927,104 +816,123 @@ const ocrStatusText = computed(() => {
   }
   return `악보를 ${verb}하는 중...`
 })
+
+// 상단 상태 배너에 표시할 내용 - 우선순위: 로딩 > 에러 > 일반 메시지
+const statusBanner = computed(() => {
+  if (ocrLoading.value) return { text: ocrStatusText.value, kind: 'loading' }
+  if (ocrError.value) return { text: ocrError.value, kind: 'error' }
+  if (message.value) return { text: message.value, kind: 'info' }
+  return null
+})
 </script>
 
 <template>
   <div class="editor">
-    <div class="top-actions">
-      <button class="back" @click="emit('back')">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <!-- 상단 미니 툴바: 뒤로가기 / OCR / 저장 한 줄로 -->
+    <div class="top-bar">
+      <button class="icon-btn" title="목록" aria-label="목록" @click="emit('back')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
-        목록
+      </button>
+      <button class="ocr-pill" @click="runOcr" :disabled="ocrLoading">
+        {{ ocrLoading ? (ocrHasRun ? '재실행 중…' : 'OCR 중…') : (ocrHasRun ? 'OCR 재실행' : 'OCR 실행') }}
+      </button>
+      <button class="save-pill" :disabled="confirming || !lines.length" @click="handleSaveClick">
+        {{ confirming ? '저장 중…' : '저장' }}
       </button>
     </div>
-    <div class="ocr-bar">
-      <button class="ocr-btn" @click="runOcr" :disabled="ocrLoading">
-        {{ ocrLoading ? (ocrHasRun ? '재실행 중...' : 'OCR 중...') : (ocrHasRun ? 'OCR 다시 실행' : 'OCR 실행') }}
-      </button>
-      <div class="ocr-info">
-        <span v-if="ocrLoading" class="ocr-status">
-          <span class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
-          {{ ocrStatusText }}
-        </span>
-        <span v-else-if="ocrError" class="ocr-error">{{ ocrError }}</span>
-        <span v-else-if="ocrHasRun" class="ocr-hint warn">⚠️ 다시 실행하면 수정한 내용이 사라집니다</span>
-        <span v-else class="ocr-hint">이미지에서 기타 코드를 찾아 표시합니다</span>
-        <span v-if="message" class="msg">{{ message }}</span>
-      </div>
-    </div>
-    <section class="edit-tools card">
-      <button type="button" class="tools-header" @click="toolsOpen = !toolsOpen">
-        <h4>Tools</h4>
-        <svg class="tools-chevron" :class="{ open: toolsOpen }" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </button>
 
-      <div class="tools-body" v-if="toolsOpen">
-        <div class="tool-line-block">
-          <div class="tlb-col">
-            <span class="tool-row-label">Line</span>
-            <div class="tlb-controls">
-              <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
-              <span class="tool-sep">/</span>
-              <div class="tool-btns">
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
+    <p v-if="statusBanner" class="status-banner" :class="statusBanner.kind">
+      <span v-if="statusBanner.kind === 'loading'" class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />
+      {{ statusBanner.text }}
+    </p>
+
+    <!-- 캔버스: 화면 대부분 차지, 곧바로 보임 -->
+    <div class="canvas-wrap" v-if="imageUrl">
+      <div class="zoom-bar">
+        <button type="button" :disabled="zoom <= ZOOM_MIN" @click="zoomOut" title="축소">−</button>
+        <span class="zoom-val">{{ Math.round(zoom * 100) }}%</span>
+        <button type="button" :disabled="zoom >= ZOOM_MAX" @click="zoomIn" title="확대">+</button>
+      </div>
+      <div class="stage-frame">
+        <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" :style="stageStyle" @click="onStageClick">
+          <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
+          <div v-if="ocrLoading" class="ocr-scan-overlay">
+            <div class="ocr-scan-info">
+              <span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" />
+              <span>{{ ocrStatusText }}</span>
+            </div>
+            <div class="ocr-scan-track">
+              <div class="ocr-scan-line" />
+              <div class="ocr-scan-glass">
+                <svg viewBox="0 0 24 24" width="34" height="34" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="10.5" cy="10.5" r="6.5" stroke="#0d6efd" stroke-width="2.4"/>
+                  <line x1="15.3" y1="15.3" x2="21" y2="21" stroke="#0d6efd" stroke-width="2.4" stroke-linecap="round"/>
+                </svg>
               </div>
             </div>
           </div>
-          <div class="tlb-col align-right">
-            <span class="ml-label">Multi</span>
-            <div class="tlb-controls">
-              <button
-                type="button"
-                class="ml-switch"
-                :class="{ on: multiSelectMode }"
-                role="switch"
-                :aria-checked="multiSelectMode"
-                @click="toggleMultiSelectMode"
+          <div
+            v-for="line in lines"
+            :key="line.id"
+            class="chord-line"
+            :class="{ active: isLineSelected(line.id) }"
+            :style="lineStyle(line)"
+            @click="onLineClick($event, line)"
+            @pointerdown="onLineBodyDown($event, line)"
+          >
+            <div class="handle left" @pointerdown="startDrag($event, 'line-left', line.id)" />
+            <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
+            <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
+            <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
+            <div class="move-hint" title="드래그해서 코드줄 전체 이동">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="5 9 2 12 5 15" />
+                <polyline points="9 5 12 2 15 5" />
+                <polyline points="15 19 12 22 9 19" />
+                <polyline points="19 9 22 12 19 15" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <line x1="12" y1="2" x2="12" y2="22" />
+              </svg>
+            </div>
+            <div class="items-layer">
+              <div
+                v-for="item in line.items"
+                :key="item.id"
+                class="chip"
+                :style="{ left: chordLeftPct(line, item), fontSize: displayFontPx + 'px' }"
+                @pointerdown="startDrag($event, 'chord-x', line.id, item.id)"
+                @click="onChipClick($event, line, item)"
+                @dblclick.stop="startEdit(line.id, item)"
               >
-                <span class="ml-knob" />
-              </button>
-              <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
+                <template v-if="editKey === line.id + ':' + item.id">
+                  <input :data-edit-key="line.id + ':' + item.id" v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
+                </template>
+                <template v-else>
+                  <span>{{ item.chord }}</span>
+                  <button class="x" @click.stop="removeItem(line, item.id)" @pointerdown.stop>×</button>
+                </template>
+              </div>
             </div>
           </div>
-        </div>
-        <p v-if="showLineHelp" class="help-text">PC는 Shift+클릭으로도 여러 줄을 선택할 수 있어요</p>
-        <p v-if="selectedLineIds.length > 1" class="ms-count">
-          {{ selectedLineIds.length }}개 선택됨
-          <button type="button" class="ms-clear" @click="clearLineSelection">해제</button>
-        </p>
-
-        <div class="tool-line-row">
-          <span class="tool-row-label">Chord</span>
-          <div class="tool-btns">
-            <button type="button" @click="bumpFont(-1)">A-</button>
-            <button type="button" @click="bumpFont(1)">A+</button>
-          </div>
-          <span class="tool-sep">/</span>
-          <div class="tool-btns">
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
+          <div v-if="placeChord" class="place-banner" @click.stop>
+            「{{ placeChord }}」 선택됨 — 코드줄 탭해서 삽입 · Esc 취소
+            <button type="button" @click="clearPlace">취소</button>
           </div>
         </div>
+      </div>
+    </div>
+    <div v-else class="canvas-empty">악보 이미지를 불러오는 중입니다…</div>
 
+    <!-- 하단 고정 도구: 배치 / 조정 탭 -->
+    <div class="bottom-tools">
+      <div class="bt-tabs">
+        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'">코드 배치</button>
+        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'">위치 조정</button>
+      </div>
+
+      <div class="bt-panel" v-show="bottomTab === 'place'">
         <div class="roots">
           <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
         </div>
@@ -1034,94 +942,74 @@ const ocrStatusText = computed(() => {
         <div class="custom-row">
           <input v-model="customChord" placeholder="직접 입력" @keyup.enter="pickCustom" />
           <button type="button" class="act" @click="pickCustom">선택</button>
+          <button type="button" class="act ghost" @click="addEmptyLine">+ 새 줄</button>
         </div>
       </div>
-    </section>
-    <div class="stage-frame" v-if="imageUrl">
-    <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" @click="onStageClick">
-      <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
-      <div v-if="ocrLoading" class="ocr-scan-overlay">
-        <div class="ocr-scan-info">
-          <span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" />
-          <span>{{ ocrStatusText }}</span>
-        </div>
-        <div class="ocr-scan-track">
-          <div class="ocr-scan-line" />
-          <div class="ocr-scan-glass">
-            <svg viewBox="0 0 24 24" width="34" height="34" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="10.5" cy="10.5" r="6.5" stroke="#0d6efd" stroke-width="2.4"/>
-              <line x1="15.3" y1="15.3" x2="21" y2="21" stroke="#0d6efd" stroke-width="2.4" stroke-linecap="round"/>
-            </svg>
-          </div>
-        </div>
-      </div>
-      <div
-        v-for="line in displayLines"
-        :key="line.id"
-        class="chord-line"
-        :class="{ active: isLineSelected(line.id) }"
-        :style="lineStyle(line)"
-        @click="onLineClick($event, line)"
-        @pointerdown="onLineBodyDown($event, line)"
-      >
-        <div class="handle left" @pointerdown="startDrag($event, 'line-left', line.id)" />
-        <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
-        <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
-        <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
-        <div class="move-hint" title="드래그해서 코드줄 전체 이동">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="5 9 2 12 5 15" />
-            <polyline points="9 5 12 2 15 5" />
-            <polyline points="15 19 12 22 9 19" />
-            <polyline points="19 9 22 12 19 15" />
-            <line x1="2" y1="12" x2="22" y2="12" />
-            <line x1="12" y1="2" x2="12" y2="22" />
-          </svg>
-        </div>
-        <div class="items-layer">
-          <div
-            v-for="item in line.items"
-            :key="item.id"
-            class="chip"
-            :style="{ left: chordLeftPct(line, item), fontSize: chordFontPx + 'px' }"
-            @pointerdown="startDrag($event, 'chord-x', line.id, item.id)"
-            @click="onChipClick($event, line, item)"
-            @dblclick.stop="startEdit(line.id, item)"
+
+      <div class="bt-panel" v-show="bottomTab === 'adjust'">
+        <div class="ml-row">
+          <span class="ml-label">Multi</span>
+          <button
+            type="button"
+            class="ml-switch"
+            :class="{ on: multiSelectMode }"
+            role="switch"
+            :aria-checked="multiSelectMode"
+            @click="toggleMultiSelectMode"
           >
-            <template v-if="editKey === line.id + ':' + item.id">
-              <input :data-edit-key="line.id + ':' + item.id" v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
-            </template>
-            <template v-else>
-              <span>{{ item.chord }}</span>
-              <button class="x" @click.stop="removeItem(line, item.id)" @pointerdown.stop>×</button>
-            </template>
+            <span class="ml-knob" />
+          </button>
+          <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
+          <button
+            v-if="selectedLineIds.length > 1"
+            type="button"
+            class="ms-clear"
+            @click="clearLineSelection"
+          >
+            {{ selectedLineIds.length }}개 선택됨 · 해제
+          </button>
+        </div>
+        <p v-if="showLineHelp" class="help-text">PC는 Shift+클릭으로도 여러 줄을 선택할 수 있어요</p>
+
+        <div class="adjust-block">
+          <span class="tool-row-label">줄 이동</span>
+          <div class="tool-btns">
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="adjust-block">
+          <span class="tool-row-label">코드만</span>
+          <div class="tool-btns">
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="adjust-block">
+          <span class="tool-row-label">코드 크기</span>
+          <div class="tool-btns">
+            <button type="button" @click="bumpFont(-1)">A-</button>
+            <button type="button" @click="bumpFont(1)">A+</button>
           </div>
         </div>
       </div>
-      <div v-if="placeChord" class="place-banner" @click.stop>
-        「{{ placeChord }}」 선택됨 — 코드줄 클릭으로 삽입 · Esc 취소
-        <button type="button" @click="clearPlace">취소</button>
-      </div>
     </div>
-    </div>
-    <section class="transpose" v-if="pageMode !== 'correct'">
-      <h3>조옮김</h3>
-      <div class="btns">
-        <button @click="doTranspose(-1)" :disabled="saving">−1</button>
-        <button @click="doTranspose(-2)" :disabled="saving">−2</button>
-        <span class="current">{{ semitones > 0 ? '+' : '' }}{{ semitones }}</span>
-        <button @click="doTranspose(1)" :disabled="saving">+1</button>
-        <button @click="doTranspose(2)" :disabled="saving">+2</button>
-      </div>
-    </section>
-    <button class="confirm" :disabled="confirming || !lines.length" @click="handleSaveClick">
-      {{ confirming ? '저장 중…' : '저장' }}
-    </button>
-    <section v-if="pageMode !== 'correct' && resultUrl" class="result-section">
-      <h3>생성된 기타 코드 악보</h3>
-      <img :src="resultUrl" alt="결과 악보" class="result-img" />
-      <a class="dl" :href="resultUrl" target="_blank" rel="noopener" download>이미지 열기 / 저장</a>
-    </section>
 
     <div v-if="showSaveModal" class="modal-backdrop" @click.self="closeSaveModal">
       <div class="modal-box">
@@ -1172,56 +1060,83 @@ const ocrStatusText = computed(() => {
 </template>
 
 <style scoped>
-.editor { display: flex; flex-direction: column; gap: 1rem; max-width: 920px; margin: 0 auto; }
-.top-actions { display: flex; justify-content: space-between; align-items: center; }
-.back {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.4rem 0.75rem 0.4rem 0.6rem;
-  border: 1px solid var(--border, #e2e6ef);
-  border-radius: 999px;
-  background: var(--surface, #fff);
-  color: var(--text, #1a1d26);
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.1s;
-}
-.back svg {
-  color: var(--text-muted, #5c6578);
-  transition: transform 0.15s;
-}
-.back:hover {
-  border-color: #93c5fd;
-  background: var(--primary-soft, #eff4ff);
-}
-.back:hover svg {
-  transform: translateX(-2px);
-}
-.back:active {
-  transform: scale(0.97);
-}
-.meta { font-size: 0.85rem; color: #666; }
-.hint { font-size: 0.85rem; color: #444; background: #f5f7fa; padding: 0.6rem 0.8rem; border-radius: 6px; line-height: 1.5; }
-.ocr-bar { display: flex; gap: 0.7rem; align-items: flex-start; padding: 0.6rem 0.8rem; background: #f0f6ff; border: 1px solid #c5d9ff; border-radius: 8px; }
-.ocr-btn { flex-shrink: 0; padding: 0.5rem 0.9rem; background: #0d6efd; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; white-space: nowrap; }
-.ocr-btn:disabled { opacity: 0.6; }
-.ocr-info {
-  flex: 1;
-  min-width: 0;
+.editor {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  padding-top: 0.35rem;
+  gap: 0.65rem;
+  max-width: 920px;
+  margin: 0 auto;
 }
-.ocr-error { color: #c00; font-size: 0.85rem; }
-.ocr-hint { color: #555; font-size: 0.85rem; line-height: 1.4; }
-.ocr-hint.warn { color: #d00; font-weight: 700; }
-.ocr-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #0d6efd; font-weight: 600; }
+
+/* --- 상단 미니 툴바 --- */
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.icon-btn {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  border: 1px solid #d8dee8;
+  background: #fff;
+  color: #1a1a2e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.icon-btn:hover { background: #f1f5f9; }
+.ocr-pill {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid #93c5fd;
+  background: #eff6ff;
+  color: #0d6efd;
+  font-weight: 700;
+  font-size: 0.92rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ocr-pill:disabled { opacity: 0.6; cursor: not-allowed; }
+.save-pill {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.5rem;
+  border-radius: 999px;
+  border: none;
+  background: #0a7a3e;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.92rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.save-pill:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- 상태 배너 --- */
+.status-banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.status-banner.loading { background: #eff6ff; color: #0d6efd; }
+.status-banner.error { background: #fef2f2; color: #c00; }
+.status-banner.info { background: #ecfdf5; color: #0a7a3e; }
 .ocr-status-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: #0d6efd;
+  background: currentColor;
+  flex-shrink: 0;
   animation: ocr-dot-pulse 1s ease-in-out infinite;
 }
 .ocr-status-dot.queued { background: #f5a623; }
@@ -1230,7 +1145,378 @@ const ocrStatusText = computed(() => {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* --- OCR 진행 중 돋보기 스캔 오버레이 --- */
+/* --- 캔버스 --- */
+.canvas-wrap {
+  position: relative;
+}
+.canvas-empty {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  color: #94a3b8;
+  background: #f8fafc;
+  border-radius: 10px;
+  border: 1px dashed #d8dee8;
+}
+.zoom-bar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #d8dee8;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+}
+.zoom-bar button {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  border: none;
+  background: #1e293b;
+  color: #fff;
+  font-weight: 800;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.zoom-bar button:disabled { opacity: 0.35; cursor: not-allowed; }
+.zoom-val {
+  min-width: 2.6rem;
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #475569;
+}
+
+.stage-frame {
+  width: 100%;
+  min-height: 360px;
+  max-height: 70vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #e8e8e8;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+}
+.stage {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  border: none;
+  background: #fff;
+  user-select: none;
+  touch-action: none;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+.stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
+.score-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  vertical-align: top;
+  pointer-events: none;
+}
+.chord-line {
+  position: absolute;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  z-index: 2;
+  min-height: 18px;
+  cursor: grab;
+}
+.chord-line:hover {
+  border-color: rgba(13, 110, 253, 0.4);
+}
+.chord-line.active {
+  border: 1.5px solid #0d6efd;
+}
+.chord-line:active { cursor: grabbing; }
+.handle {
+  position: absolute;
+  z-index: 4;
+  background: transparent;
+  opacity: 0;
+}
+.chord-line:hover .handle,
+.chord-line.active .handle {
+  opacity: 1;
+}
+.handle.left { left: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
+.handle.right { right: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
+.handle.top { top: -9px; left: 0; right: 0; height: 18px; cursor: ns-resize; }
+.handle.bottom { bottom: -9px; left: 0; right: 0; height: 18px; cursor: ns-resize; }
+.handle.top::after,
+.handle.bottom::after {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #0d6efd;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+.handle.left::after,
+.handle.right::after {
+  content: '';
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  width: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0d6efd;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+.items-layer { position: absolute; inset: 0; pointer-events: none; }
+.move-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  color: #3b82f6;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.chord-line:hover .move-hint {
+  opacity: 0.35;
+}
+.chip {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  font-weight: 800;
+  color: #ff2d55;
+  text-shadow:
+    0 0 2px #fff,
+    0 0 3px #fff,
+    1px 0 0 #fff,
+    -1px 0 0 #fff,
+    0 1px 0 #fff,
+    0 -1px 0 #fff;
+  background: transparent;
+  border-radius: 4px;
+  padding: 0.25rem 0.2rem 0.25rem 0.4rem;
+  pointer-events: auto;
+  cursor: grab;
+  white-space: nowrap;
+  max-width: 5rem;
+}
+.chip input { width: 2.6rem; font-size: inherit; font-weight: 700; border: 1px solid #333; border-radius: 2px; padding: 0 2px; }
+.chip .x {
+  border: none;
+  background: transparent;
+  color: #a00;
+  cursor: pointer;
+  font-size: 1.05em;
+  padding: 0.2rem 0.35rem;
+  opacity: 0.65;
+}
+.place-banner {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  background: rgba(13, 110, 253, 0.92);
+  color: #fff;
+  text-align: center;
+  padding: 0.6rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  z-index: 10;
+}
+.place-banner button {
+  background: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  margin-left: 8px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+/* --- 하단 고정 도구 --- */
+.bottom-tools {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: #fff;
+  border: 1px solid #e2e6ef;
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -4px 14px rgba(16, 24, 40, 0.08);
+  overflow: hidden;
+}
+.bt-tabs {
+  display: flex;
+}
+.bt-tabs button {
+  flex: 1;
+  padding: 0.7rem 0.5rem;
+  border: none;
+  background: #f8fafc;
+  color: #64748b;
+  font-weight: 700;
+  font-size: 0.92rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.bt-tabs button.on {
+  background: #fff;
+  color: #0d6efd;
+  border-bottom-color: #0d6efd;
+}
+.bt-panel {
+  padding: 0.85rem 0.9rem calc(0.85rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.roots { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.root { width: 2.5rem; height: 2.5rem; border-radius: 50%; border: 2px solid #ccc; background: #fff; font-weight: 800; font-size: 1rem; cursor: pointer; flex-shrink: 0; }
+.root.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.variants { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.pchip { padding: 0.45rem 0.65rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; font-weight: 600; font-size: 0.88rem; cursor: pointer; }
+.pchip.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.custom-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.custom-row input { flex: 1; min-width: 100px; padding: 0.55rem 0.65rem; border: 1px solid #ccc; border-radius: 8px; font-size: 0.95rem; }
+.act { padding: 0.55rem 0.85rem; border: none; border-radius: 8px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.88rem; font-weight: 600; }
+.act.ghost { background: #fff; color: #1a1a2e; border: 1px solid #ccc; }
+
+.ml-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.ml-label {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #334155;
+}
+.ml-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  border: none;
+  background: #cbd5e1;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ml-switch.on {
+  background: #0d6efd;
+}
+.ml-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+.ml-switch.on .ml-knob {
+  transform: translateX(16px);
+}
+.help-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.help-btn:hover {
+  border-color: #93c5fd;
+  color: #0d6efd;
+}
+.help-text {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #64748b;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+}
+.ms-clear {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #93c5fd;
+  border-radius: 999px;
+  background: #eff6ff;
+  cursor: pointer;
+  color: #0d6efd;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.adjust-block {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.tool-row-label {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #475569;
+  min-width: 4.2rem;
+}
+.tool-btns {
+  display: flex;
+  gap: 0.4rem;
+}
+.tool-btns button {
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  color: #0f172a;
+}
+.tool-btns button svg { display: block; }
+.tool-btns button:hover:not(:disabled) {
+  background: #eff4ff;
+  border-color: #93c5fd;
+}
+.tool-btns button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* --- OCR 스캔 오버레이 --- */
 .ocr-scan-overlay {
   position: absolute;
   inset: 0;
@@ -1293,359 +1579,8 @@ const ocrStatusText = computed(() => {
   75%  { left: 50%;  transform: translate(-50%, -35%) rotate(8deg); }
   100% { left: 0%;   transform: translate(0, -50%) rotate(-8deg); }
 }
-.mode-bar { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
-.mode-bar button { padding: 0.4rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-weight: 600; }
-.mode-bar button.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
-.mode-bar .save-base { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
-.dup-box { background: #fff8e6; border: 1px solid #e6c200; border-radius: 8px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; }
-.dup-box button { text-align: left; padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
-.dup-box .force { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
-.edit-tools {
-  padding: 0;
-  overflow: hidden;
-}
-.tools-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.8rem 1rem;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.tools-header h4 {
-  margin: 0;
-  font-size: 1.05rem;
-  font-weight: 800;
-  color: #1a1d26;
-}
-.tools-chevron {
-  color: #1a1d26;
-  transition: transform 0.15s;
-}
-.tools-chevron.open {
-  transform: rotate(180deg);
-}
-.tools-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-  padding: 0 1rem 1rem;
-  border-top: 1px solid var(--border, #e2e6ef);
-  padding-top: 0.85rem;
-}
-.tool-line-block {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: start;
-  gap: 0.4rem 0.75rem;
-}
-.tlb-col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  min-width: 0;
-}
-.tlb-col.align-right {
-  align-items: flex-end;
-}
-.tlb-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-.tool-line-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-.tool-row-label {
-  font-weight: 700;
-  font-size: 0.85rem;
-  color: #475569;
-}
-.tool-sep {
-  color: #cbd5e1;
-  font-weight: 400;
-  font-size: 0.95rem;
-  flex-shrink: 0;
-}
-.mini-btn {
-  width: 2.1rem;
-  height: 2.1rem;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  font-weight: 700;
-  font-size: 1.1rem;
-  color: #1e293b;
-  line-height: 1;
-}
-.mini-btn:hover {
-  background: #eff4ff;
-  border-color: #93c5fd;
-}
-.tool-btns {
-  display: flex;
-  gap: 0.35rem;
-  flex-shrink: 0;
-}
-.tool-btns button {
-  width: 2.1rem;
-  height: 2.1rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  font-weight: 700;
-  color: #1e293b;
-}
-.tool-btns button svg {
-  display: block;
-}
-.tool-btns button:hover:not(:disabled) {
-  background: #eff4ff;
-  border-color: #93c5fd;
-}
-.tool-btns button:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.ml-label {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #334155;
-}
-.ml-switch {
-  position: relative;
-  width: 38px;
-  height: 22px;
-  border-radius: 999px;
-  border: none;
-  background: #cbd5e1;
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.ml-switch.on {
-  background: #0d6efd;
-}
-.ml-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 0.15s;
-}
-.ml-switch.on .ml-knob {
-  transform: translateX(16px);
-}
-.help-btn {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 1px solid #cbd5e1;
-  background: #fff;
-  color: #64748b;
-  font-size: 0.7rem;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-}
-.help-btn:hover {
-  border-color: #93c5fd;
-  color: #0d6efd;
-}
-.help-text {
-  margin: 0;
-  font-size: 0.78rem;
-  color: #64748b;
-  background: #f8fafc;
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-}
-.ms-count {
-  margin: 0;
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: #0d6efd;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-.ms-clear {
-  padding: 0.2rem 0.5rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  color: #555;
-  font-size: 0.75rem;
-  font-weight: 500;
-}
-.stage-frame {
-  width: 100%;
-  min-height: 360px;
-  max-height: 75vh;
-  overflow: auto;
-  background: #e8e8e8;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-}
-.stage {
-  position: relative;
-  width: 100%;
-  max-width: 640px;
-  border: none;
-  background: #fff;
-  user-select: none;
-  touch-action: none;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-}
-.stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
-.score-img {
-  display: block;
-  width: 100%;
-  height: auto;
-  vertical-align: top;
-  pointer-events: none;
-}
-.chord-line {
-  position: absolute;
-  box-sizing: border-box;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 2px;
-  z-index: 2;
-  min-height: 18px;
-  cursor: grab;
-}
-.chord-line:hover {
-  border-color: rgba(13, 110, 253, 0.4);
-}
-.chord-line.active {
-  border: 1.5px solid #0d6efd;
-}
-.chord-line:active { cursor: grabbing; }
-/* 핸들이 두꺼운 파란 테두리처럼 보이던 원인 → 기본 투명, 호버 시에만 */
-.handle {
-  position: absolute;
-  z-index: 4;
-  background: transparent;
-  opacity: 0;
-}
-.chord-line:hover .handle,
-.chord-line.active .handle {
-  opacity: 1;
-  /* 배경 없음 - ::after 의 얇은 마커선만 표시 (넓은 반투명 밴드가 그림자처럼 보이는 문제 해결) */
-}
-.handle.left { left: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
-.handle.right { right: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; }
-.handle.top { top: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; }
-.handle.bottom { bottom: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; }
-.handle.top::after,
-.handle.bottom::after {
-  content: '';
-  position: absolute;
-  left: 20%;
-  right: 20%;
-  height: 2px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: #0d6efd;
-  border-radius: 2px;
-  opacity: 0.9;
-}
-.handle.left::after,
-.handle.right::after {
-  content: '';
-  position: absolute;
-  top: 20%;
-  bottom: 20%;
-  width: 2px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #0d6efd;
-  border-radius: 2px;
-  opacity: 0.9;
-}
-.items-layer { position: absolute; inset: 0; pointer-events: none; }
-.move-hint {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 3;
-  color: #3b82f6;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s;
-}
-.chord-line:hover .move-hint {
-  opacity: 0.35;
-}
-.chip {
-  position: absolute;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  font-weight: 800;
-  color: #ff2d55;
-  text-shadow:
-    0 0 2px #fff,
-    0 0 3px #fff,
-    1px 0 0 #fff,
-    -1px 0 0 #fff,
-    0 1px 0 #fff,
-    0 -1px 0 #fff;
-  background: transparent;
-  border-radius: 3px;
-  padding: 0 2px 0 4px;
-  pointer-events: auto;
-  cursor: grab;
-  white-space: nowrap;
-  max-width: 5rem;
-}
-.chip input { width: 2.6rem; font-size: inherit; font-weight: 700; border: 1px solid #333; border-radius: 2px; padding: 0 2px; }
-.chip .x { border: none; background: transparent; color: #a00; cursor: pointer; font-size: 0.9em; padding: 0 1px; opacity: 0.55; }
-.place-banner { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(13, 110, 253, 0.92); color: #fff; text-align: center; padding: 0.4rem; font-size: 0.9rem; z-index: 10; }
-.place-banner button { background: #fff; border: none; border-radius: 4px; padding: 2px 8px; margin-left: 6px; cursor: pointer; }
-.roots { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-.root { width: 2.2rem; height: 2.2rem; border-radius: 50%; border: 2px solid #ccc; background: #fff; font-weight: 800; font-size: 0.95rem; cursor: pointer; }
-.root.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
-.variants { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.5rem; }
-.pchip { padding: 0.35rem 0.55rem; border: 1px solid #ccc; border-radius: 5px; background: #fff; font-weight: 600; font-size: 0.85rem; cursor: pointer; }
-.pchip.on { background: #0d6efd; color: #fff; border-color: #0d6efd; }
-.custom-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-.custom-row input { flex: 1; min-width: 100px; padding: 0.4rem 0.55rem; border: 1px solid #ccc; border-radius: 6px; }
-.act { padding: 0.4rem 0.75rem; border: none; border-radius: 6px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.85rem; }
-.act.ghost { background: #fff; color: #1a1a2e; border: 1px solid #ccc; }
-.transpose .btns { display: flex; align-items: center; gap: 0.5rem; }
-.transpose button { padding: 0.5rem 0.9rem; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
-.current { min-width: 2.5rem; text-align: center; font-weight: 700; }
-.confirm { padding: 0.85rem 1.25rem; background: #0a7a3e; color: #fff; border: none; border-radius: 8px; font-size: 1.05rem; font-weight: 600; cursor: pointer; }
-.confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- 저장 모달 --- */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1732,9 +1667,4 @@ const ocrStatusText = computed(() => {
 }
 .modal-cancel:disabled,
 .modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
-.msg { color: #0a7; }
-.result-section { margin-top: 0.5rem; padding: 1rem; border: 2px solid #0a7a3e; border-radius: 10px; background: #f6fbf8; }
-.result-section h3 { margin: 0 0 0.75rem; color: #0a7a3e; }
-.result-img { display: block; width: 100%; border-radius: 6px; border: 1px solid #ddd; }
-.dl { display: inline-block; margin-top: 0.6rem; color: #0d6efd; font-size: 0.9rem; }
 </style>
