@@ -34,12 +34,16 @@ const activeLineId = ref(null)
 const placeChord = ref('')
 const customChord = ref('')
 const stageRef = ref(null)
+const stageFrameRef = ref(null)
 const drag = ref(null)
 const chordFontPx = ref(13)
 const selectedRoot = ref(null)
 
 // --- 하단 도구 탭: 배치(코드 고르기) / 조정(이동·크기) ---
 const bottomTab = ref('place')
+watch(bottomTab, (tab) => {
+  if (tab !== 'place') clearPlace()
+})
 
 // --- 캔버스 확대/축소 (모바일에서 정밀 배치용) ---
 const zoom = ref(1)
@@ -52,12 +56,55 @@ function zoomIn() {
 function zoomOut() {
   zoom.value = Math.max(ZOOM_MIN, +(zoom.value - ZOOM_STEP).toFixed(2))
 }
+// 확대된 상태에서 버튼으로 화면 이동 - 캔버스를 직접 드래그하면
+// 라인이 잡혀 오동작하기 쉬우므로, 드래그 없이 이동할 수 있는 수단 제공
+const PAN_STEP = 90
+function panBy(dx, dy) {
+  stageFrameRef.value?.scrollBy({ left: dx, top: dy, behavior: 'smooth' })
+}
 // 좌표 계산(normFromEvent)은 실제 렌더된 stage 크기를 기준으로 하므로
 // 확대해도 드래그/클릭 위치 계산은 그대로 정확하게 맞는다.
 const stageStyle = computed(() => {
   if (zoom.value <= 1) return {}
   return { width: `${zoom.value * 100}%`, maxWidth: 'none' }
 })
+
+// --- 두 손가락 핀치로 확대/축소 ---
+// stage-frame에 pointerdown을 캡처 단계로 걸어서, 자식(코드줄/칩 등)이
+// stopPropagation을 해도 두 번째 손가락 터치를 항상 감지할 수 있게 한다.
+// pointerup/cancel은 핀치 중이 아니어도 항상(마운트 시부터) 리스닝해야 한다 -
+// 안 그러면 마우스 클릭 한 번만 해도 그 포인터가 지워지지 않고 남아있다가
+// 다음 클릭과 합쳐져 "2개"로 잘못 인식되어 핀치가 오작동한다.
+const activePointers = new Map()
+let pinchStartDist = 0
+let pinchStartZoom = 1
+
+function pointerDist(pts) {
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+}
+
+function onStagePointerDownCapture(e) {
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  if (activePointers.size === 2) {
+    // 핀치 시작 - 진행 중이던 단일 드래그(코드/줄 이동)는 취소
+    drag.value = null
+    pinchStartDist = pointerDist([...activePointers.values()])
+    pinchStartZoom = zoom.value
+  }
+}
+function onGlobalPointerMove(e) {
+  if (!activePointers.has(e.pointerId)) return
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  if (activePointers.size < 2 || pinchStartDist <= 0) return
+  const dist = pointerDist([...activePointers.values()])
+  zoom.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, +(pinchStartZoom * (dist / pinchStartDist)).toFixed(2)))
+}
+function onGlobalPointerUp(e) {
+  activePointers.delete(e.pointerId)
+  if (activePointers.size < 2) {
+    pinchStartDist = 0
+  }
+}
 // 화면에 보여줄 코드 글자 크기 = 저장용 기준 크기 × 확대 배율.
 // (서버에 저장되는 chordFontPx 자체는 건드리지 않고, 화면 표시만 확대에 맞춰 커짐)
 const displayFontPx = computed(() => Math.round(chordFontPx.value * zoom.value))
@@ -90,7 +137,14 @@ function toggleLineSelection(id) {
 
 function toggleMultiSelectMode() {
   multiSelectMode.value = !multiSelectMode.value
-  if (!multiSelectMode.value) selectedLineIds.value = []
+  if (multiSelectMode.value) {
+    // 이미 선택되어 있던 줄이 있으면 다중 선택으로 그대로 이어받는다
+    if (activeLineId.value && !selectedLineIds.value.length) {
+      selectedLineIds.value = [activeLineId.value]
+    }
+  } else {
+    selectedLineIds.value = []
+  }
 }
 
 function clearLineSelection() {
@@ -414,7 +468,11 @@ function normFromEvent(e) {
 
 function startDrag(e, type, lineId, itemId = null) {
   if (placeChord.value) return
-  e.preventDefault()
+  // 주의: 여기서 e.preventDefault()를 호출하면 안 된다 -
+  // 터치 환경에서 pointerdown에 preventDefault를 걸면 브라우저가 그 터치에서
+  // 파생되는 click/dblclick 합성 이벤트 자체를 만들지 않아서, 더블탭으로
+  // 편집모드 진입하는 게 완전히 막혀버린다. 스크롤/제스처 억제는
+  // .chord-line/.handle/.chip에 걸어둔 CSS touch-action:none이 대신 처리한다.
   e.stopPropagation()
   activeLineId.value = lineId
   const line0 = lines.value.find((L) => L.id === lineId)
@@ -437,6 +495,8 @@ function startDrag(e, type, lineId, itemId = null) {
     moved: false,
     startX: pos0?.x ?? 0,
     startY: pos0?.y ?? 0,
+    startClientX: e.clientX,
+    startClientY: e.clientY,
     origY: line0?.y ?? 0,
     origHeight: line0?.height ?? 0.032,
     origXStart: line0?.xStart ?? 0.01,
@@ -445,10 +505,20 @@ function startDrag(e, type, lineId, itemId = null) {
     chordGrabOffset,
     origChordT,
   }
+  // 클릭/탭인지 실제 드래그인지 구분하는 최소 이동 거리(px).
+  // 이게 없으면 손가락/마우스의 미세한 떨림도 "이동"으로 잡혀서
+  // 단순 클릭에도 saveLines()가 호출되고, 그로 인한 리렌더가
+  // 더블클릭(더블탭) 판정을 깨버리는 문제가 있었다.
+  const DRAG_THRESHOLD_PX = 4
   const onMove = (ev) => {
+    if (!drag.value) return
+    if (!drag.value.moved) {
+      const movedPx = Math.hypot(ev.clientX - drag.value.startClientX, ev.clientY - drag.value.startClientY)
+      if (movedPx < DRAG_THRESHOLD_PX) return
+      drag.value.moved = true
+    }
     const pos = normFromEvent(ev)
-    if (!pos || !drag.value) return
-    drag.value.moved = true
+    if (!pos) return
     const line = lines.value.find((L) => L.id === drag.value.lineId)
     if (!line) return
     const t = drag.value.type
@@ -588,11 +658,28 @@ function onLineClick(e, line) {
   saveLines()
 }
 
+// 네이티브 dblclick은 모바일에서 touch-action:none 때문에 발생하지 않으므로
+// (드래그를 위해 필요한 설정이라 되돌릴 수 없음), click 두 번을 직접 시간차로
+// 감지해서 더블탭/더블클릭을 흉내낸다.
+let lastChipClickKey = null
+let lastChipClickTime = 0
+const MANUAL_DBLCLICK_MS = 400
+
 function onChipClick(e, line, item) {
   e.stopPropagation()
   if (placeChord.value) {
     onLineClick(e, line)
+    return
   }
+  const key = `${line.id}:${item.id}`
+  const now = Date.now()
+  if (lastChipClickKey === key && now - lastChipClickTime < MANUAL_DBLCLICK_MS) {
+    lastChipClickKey = null
+    if (editKey.value !== key) startEdit(line.id, item)
+    return
+  }
+  lastChipClickKey = key
+  lastChipClickTime = now
 }
 
 function startEdit(lineId, item) {
@@ -664,8 +751,18 @@ function onKeydownEsc(e) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydownEsc))
-onUnmounted(() => window.removeEventListener('keydown', onKeydownEsc))
+onMounted(() => {
+  window.addEventListener('keydown', onKeydownEsc)
+  window.addEventListener('pointermove', onGlobalPointerMove)
+  window.addEventListener('pointerup', onGlobalPointerUp)
+  window.addEventListener('pointercancel', onGlobalPointerUp)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydownEsc)
+  window.removeEventListener('pointermove', onGlobalPointerMove)
+  window.removeEventListener('pointerup', onGlobalPointerUp)
+  window.removeEventListener('pointercancel', onGlobalPointerUp)
+})
 function addEmptyLine() {
   const line = {
     id: 'L' + Date.now().toString(36),
@@ -850,12 +947,26 @@ const statusBanner = computed(() => {
 
     <!-- 캔버스: 화면 대부분 차지, 곧바로 보임 -->
     <div class="canvas-wrap" v-if="imageUrl">
-      <div class="zoom-bar">
+      <div class="zoom-bar" :class="{ dim: zoom <= ZOOM_MIN }">
         <button type="button" :disabled="zoom <= ZOOM_MIN" @click="zoomOut" title="축소">−</button>
         <span class="zoom-val">{{ Math.round(zoom * 100) }}%</span>
         <button type="button" :disabled="zoom >= ZOOM_MAX" @click="zoomIn" title="확대">+</button>
       </div>
-      <div class="stage-frame">
+      <div class="pan-bar" v-if="zoom > ZOOM_MIN">
+        <button type="button" class="pan-btn" title="위로" @click="panBy(0, -PAN_STEP)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </button>
+        <button type="button" class="pan-btn" title="아래로" @click="panBy(0, PAN_STEP)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </button>
+        <button type="button" class="pan-btn" title="왼쪽으로" @click="panBy(-PAN_STEP, 0)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </button>
+        <button type="button" class="pan-btn" title="오른쪽으로" @click="panBy(PAN_STEP, 0)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </button>
+      </div>
+      <div ref="stageFrameRef" class="stage-frame" @pointerdown.capture="onStagePointerDownCapture">
         <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" :style="stageStyle" @click="onStageClick">
           <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
           <div v-if="ocrLoading" class="ocr-scan-overlay">
@@ -908,10 +1019,16 @@ const statusBanner = computed(() => {
               >
                 <template v-if="editKey === line.id + ':' + item.id">
                   <input :data-edit-key="line.id + ':' + item.id" v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
+                  <button
+                    class="x edit-x"
+                    title="삭제"
+                    @mousedown.prevent
+                    @pointerdown.stop.prevent
+                    @click.stop="removeItem(line, item.id)"
+                  >×</button>
                 </template>
                 <template v-else>
                   <span>{{ item.chord }}</span>
-                  <button class="x" @click.stop="removeItem(line, item.id)" @pointerdown.stop>×</button>
                 </template>
               </div>
             </div>
@@ -942,70 +1059,71 @@ const statusBanner = computed(() => {
         <div class="custom-row">
           <input v-model="customChord" placeholder="직접 입력" @keyup.enter="pickCustom" />
           <button type="button" class="act" @click="pickCustom">선택</button>
-          <button type="button" class="act ghost" @click="addEmptyLine">+ 새 줄</button>
         </div>
       </div>
 
       <div class="bt-panel" v-show="bottomTab === 'adjust'">
-        <div class="ml-row">
-          <span class="ml-label">Multi</span>
-          <button
-            type="button"
-            class="ml-switch"
-            :class="{ on: multiSelectMode }"
-            role="switch"
-            :aria-checked="multiSelectMode"
-            @click="toggleMultiSelectMode"
-          >
-            <span class="ml-knob" />
-          </button>
-          <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
-          <button
-            v-if="selectedLineIds.length > 1"
-            type="button"
-            class="ms-clear"
-            @click="clearLineSelection"
-          >
-            {{ selectedLineIds.length }}개 선택됨 · 해제
-          </button>
+        <div class="tool-line-block">
+          <div class="tlb-col">
+            <span class="tool-row-label">Line</span>
+            <div class="tlb-controls">
+              <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
+              <div class="tool-btns">
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="tlb-col align-right">
+            <span class="ml-label">Multi</span>
+            <div class="tlb-controls">
+              <button
+                type="button"
+                class="ml-switch"
+                :class="{ on: multiSelectMode }"
+                role="switch"
+                :aria-checked="multiSelectMode"
+                @click="toggleMultiSelectMode"
+              >
+                <span class="ml-knob" />
+              </button>
+              <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
+            </div>
+          </div>
         </div>
         <p v-if="showLineHelp" class="help-text">PC는 Shift+클릭으로도 여러 줄을 선택할 수 있어요</p>
+        <p v-if="selectedLineIds.length > 1" class="ms-count">
+          {{ selectedLineIds.length }}개 선택됨
+          <button type="button" class="ms-clear" @click="clearLineSelection">해제</button>
+        </p>
 
-        <div class="adjust-block">
-          <span class="tool-row-label">줄 이동</span>
-          <div class="tool-btns">
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-          </div>
-        </div>
+        <div class="tool-divider"></div>
 
-        <div class="adjust-block">
-          <span class="tool-row-label">코드만</span>
-          <div class="tool-btns">
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-          </div>
-        </div>
-
-        <div class="adjust-block">
-          <span class="tool-row-label">코드 크기</span>
-          <div class="tool-btns">
-            <button type="button" @click="bumpFont(-1)">A-</button>
-            <button type="button" @click="bumpFont(1)">A+</button>
+        <div class="tlb-col">
+          <span class="tool-row-label">Chord</span>
+          <div class="tlb-controls">
+            <div class="tool-btns">
+              <button type="button" @click="bumpFont(-1)">A-</button>
+              <button type="button" @click="bumpFont(1)">A+</button>
+            </div>
+            <div class="tool-btns">
+              <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              </button>
+              <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1164,22 +1282,35 @@ const statusBanner = computed(() => {
   z-index: 6;
   display: flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.28rem;
   padding: 0.25rem 0.4rem;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid #d8dee8;
   box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  transform-origin: top right;
+  transition: opacity 0.2s, transform 0.2s;
+}
+.zoom-bar.dim {
+  opacity: 0.55;
+  transform: scale(0.85);
+}
+.zoom-bar.dim:hover,
+.zoom-bar.dim:focus-within,
+.zoom-bar.dim:active {
+  opacity: 1;
+  transform: scale(1);
 }
 .zoom-bar button {
-  width: 1.7rem;
-  height: 1.7rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  flex-shrink: 0;
   border-radius: 50%;
   border: none;
   background: #1e293b;
   color: #fff;
   font-weight: 800;
-  font-size: 1rem;
+  font-size: 0.95rem;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -1188,12 +1319,41 @@ const statusBanner = computed(() => {
 }
 .zoom-bar button:disabled { opacity: 0.35; cursor: not-allowed; }
 .zoom-val {
-  min-width: 2.6rem;
+  min-width: 2.3rem;
   text-align: center;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 700;
   color: #475569;
+  flex-shrink: 0;
 }
+.pan-bar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #d8dee8;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+}
+.pan-btn {
+  width: 1.6rem;
+  height: 1.6rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: none;
+  background: #0d6efd;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pan-btn:hover { background: #0b5ed7; }
 
 .stage-frame {
   width: 100%;
@@ -1201,6 +1361,7 @@ const statusBanner = computed(() => {
   max-height: 70vh;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
   background: #e8e8e8;
   border: 1px solid #ddd;
   border-radius: 10px;
@@ -1213,7 +1374,7 @@ const statusBanner = computed(() => {
   border: none;
   background: #fff;
   user-select: none;
-  touch-action: none;
+  touch-action: pan-x pan-y;
   box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 .stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
@@ -1227,18 +1388,21 @@ const statusBanner = computed(() => {
 .chord-line {
   position: absolute;
   box-sizing: border-box;
-  background: transparent;
-  border: 1px solid transparent;
+  background: rgba(13, 110, 253, 0.035);
+  border: 1px solid rgba(13, 110, 253, 0.18);
   border-radius: 2px;
   z-index: 2;
   min-height: 18px;
   cursor: grab;
+  touch-action: none;
 }
 .chord-line:hover {
-  border-color: rgba(13, 110, 253, 0.4);
+  border-color: rgba(13, 110, 253, 0.5);
+  background: rgba(13, 110, 253, 0.06);
 }
 .chord-line.active {
   border: 1.5px solid #0d6efd;
+  background: rgba(13, 110, 253, 0.06);
 }
 .chord-line:active { cursor: grabbing; }
 .handle {
@@ -1246,6 +1410,7 @@ const statusBanner = computed(() => {
   z-index: 4;
   background: transparent;
   opacity: 0;
+  touch-action: none;
 }
 .chord-line:hover .handle,
 .chord-line.active .handle {
@@ -1304,6 +1469,7 @@ const statusBanner = computed(() => {
   align-items: center;
   font-weight: 800;
   color: #ff2d55;
+  touch-action: none;
   text-shadow:
     0 0 2px #fff,
     0 0 3px #fff,
@@ -1328,6 +1494,17 @@ const statusBanner = computed(() => {
   font-size: 1.05em;
   padding: 0.2rem 0.35rem;
   opacity: 0.65;
+}
+.chip .edit-x {
+  margin-left: 0.3rem;
+  background: #fee2e2;
+  border-radius: 5px;
+  opacity: 1;
+  font-weight: 800;
+  padding: 0.2rem 0.5rem;
+}
+.chip .edit-x:hover {
+  background: #fecaca;
 }
 .place-banner {
   position: absolute;
@@ -1400,11 +1577,25 @@ const statusBanner = computed(() => {
 .act { padding: 0.55rem 0.85rem; border: none; border-radius: 8px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.88rem; font-weight: 600; }
 .act.ghost { background: #fff; color: #1a1a2e; border: 1px solid #ccc; }
 
-.ml-row {
+.tool-line-block {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 0.4rem 0.75rem;
+}
+.tlb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.tlb-col.align-right {
+  align-items: flex-end;
+}
+.tlb-controls {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  gap: 0.45rem;
 }
 .ml-label {
   font-size: 0.9rem;
@@ -1466,28 +1657,56 @@ const statusBanner = computed(() => {
   border-radius: 6px;
   padding: 0.4rem 0.55rem;
 }
+.ms-count {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0d6efd;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 .ms-clear {
-  padding: 0.3rem 0.6rem;
+  padding: 0.2rem 0.55rem;
   border: 1px solid #93c5fd;
   border-radius: 999px;
   background: #eff6ff;
   cursor: pointer;
   color: #0d6efd;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
-.adjust-block {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
+.tool-divider {
+  height: 1px;
+  background: #e2e6ef;
+  margin: 0.2rem 0;
 }
+
 .tool-row-label {
   font-weight: 700;
   font-size: 0.85rem;
   color: #475569;
-  min-width: 4.2rem;
+}
+.mini-btn {
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 1.2rem;
+  color: #0f172a;
+  line-height: 1;
+}
+.mini-btn:hover {
+  background: #eff4ff;
+  border-color: #93c5fd;
 }
 .tool-btns {
   display: flex;
@@ -1667,4 +1886,5 @@ const statusBanner = computed(() => {
 }
 .modal-cancel:disabled,
 .modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
 </style>

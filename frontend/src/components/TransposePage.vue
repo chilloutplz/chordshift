@@ -99,12 +99,16 @@ const previewChords = computed(() => {
   const delta = semitones.value || 0
   const lines = Array.isArray(props.sheet.chords) ? props.sheet.chords : []
   if (!lines.length) return []
+  let all
   if (lines[0]?.items) {
-    return lines.flatMap((L) =>
+    all = lines.flatMap((L) =>
       (L.items || []).map((it) => transposeChordName(it.chord, delta)),
     )
+  } else {
+    all = lines.map((c) => transposeChordName(typeof c === 'string' ? c : c.chord, delta))
   }
-  return lines.map((c) => transposeChordName(typeof c === 'string' ? c : c.chord, delta))
+  // 중복 코드는 한 번만 - 처음 등장한 순서는 유지 (공간 절약)
+  return [...new Set(all)]
 })
 
 // ±1/±2 버튼: 기존처럼 현재 위치에서 누적 이동
@@ -245,42 +249,12 @@ async function deleteSong() {
 
     <h2>{{ sheet.title || '제목 없음' }}</h2>
 
-    <section class="transpose card">
-      <h3>조옮김 <span class="transpose-label" v-if="transposeLabel">{{ transposeLabel }}</span></h3>
-      <div class="btns">
-        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-2)">−2</button>
-        <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
-        <button
-          type="button"
-          class="step origin"
-          :class="{ active: semitones === 0 }"
-          :disabled="rendering"
-          @click="goToOrigin"
-        >{{ originLabel }}</button>
-        <button type="button" class="step" :disabled="rendering" @click="doTranspose(1)">+1</button>
-        <button type="button" class="step" :disabled="rendering" @click="doTranspose(2)">+2</button>
-      </div>
-      <div class="preview-chords" v-if="previewChords.length">
-        <span v-for="(c, i) in previewChords.slice(0, 12)" :key="i" class="preview-chip">{{ c }}</span>
-        <span v-if="previewChords.length > 12" class="preview-more">…</span>
-      </div>
-    </section>
-
-    <div class="actions">
-      <button type="button" class="btn-edit" @click="emit('edit')">수정</button>
-      <button type="button" class="btn-delete" :disabled="deleting" @click="deleteSong">
-        {{ deleting ? '삭제 중…' : '삭제' }}
-      </button>
-      <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
-        다운로드
-      </button>
-    </div>
-
     <p v-if="message" class="msg" :class="{ error: renderFailed }">
       {{ message }}
       <button v-if="renderFailed" type="button" class="retry-link" @click="renderPreview">다시 시도</button>
     </p>
 
+    <!-- 캔버스: 화면 대부분 차지, 곧바로 보임 -->
     <div class="result card" v-if="previewUrl || rendering">
       <div class="img-wrap">
         <div v-if="imageLoading || rendering" class="img-loading">
@@ -298,6 +272,43 @@ async function deleteSong() {
       </div>
     </div>
     <p v-else class="muted empty">± 버튼으로 조옮김하면 결과가 여기에 표시됩니다.</p>
+
+    <!-- 하단 고정 도구: ChordEditor와 동일한 위치·스타일 -->
+    <div class="bottom-tools">
+      <div class="bt-panel">
+        <h3>조옮김 <span class="transpose-label" v-if="transposeLabel">{{ transposeLabel }}</span></h3>
+        <div class="btns">
+          <button type="button" class="step" :disabled="rendering" @click="doTranspose(-2)">−2</button>
+          <button type="button" class="step" :disabled="rendering" @click="doTranspose(-1)">−1</button>
+          <button
+            type="button"
+            class="step origin"
+            :class="{ active: semitones === 0 }"
+            :disabled="rendering"
+            @click="goToOrigin"
+          >{{ originLabel }}</button>
+          <button type="button" class="step" :disabled="rendering" @click="doTranspose(1)">+1</button>
+          <button type="button" class="step" :disabled="rendering" @click="doTranspose(2)">+2</button>
+        </div>
+        <div class="preview-chords" v-if="previewChords.length">
+          <span v-for="(c, i) in previewChords.slice(0, 12)" :key="i" class="preview-chip">{{ c }}</span>
+          <span v-if="previewChords.length > 12" class="preview-more">…</span>
+        </div>
+
+        <div class="tool-divider"></div>
+
+        <div class="actions">
+          <button type="button" class="btn-delete" :disabled="deleting" @click="deleteSong">
+            {{ deleting ? '삭제 중…' : '삭제' }}
+          </button>
+          <div class="actions-spacer"></div>
+          <button type="button" class="btn-edit" @click="emit('edit')">수정</button>
+          <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
+            다운로드
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -305,7 +316,7 @@ async function deleteSong() {
 .page {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.65rem;
 }
 .top {
   display: flex;
@@ -351,106 +362,6 @@ h2 {
   border-radius: 12px;
   padding: 1rem 1.1rem;
   box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
-}
-.transpose h3 {
-  margin: 0 0 0.65rem;
-  font-size: 0.95rem;
-}
-.btns {
-  display: flex;
-  gap: 0.45rem;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.step {
-  padding: 0.5rem 0.85rem;
-  background: #1e293b;
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.step:disabled {
-  opacity: 0.5;
-}
-.step.origin {
-  background: #0f766e;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.step.origin.active {
-  background: #0a5c55;
-  box-shadow: inset 0 0 0 2px #6ee7d5;
-}
-.transpose-label {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #0f766e;
-}
-.preview-chords {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin: 0.55rem 0 0;
-}
-.preview-chip {
-  padding: 0.15rem 0.6rem;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: #818cf8;
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-.preview-more {
-  align-self: center;
-  color: #cbd5e1;
-  font-size: 0.82rem;
-}
-.actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-.btn-edit,
-.btn-delete {
-  padding: 0.7rem 1.1rem;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-  background: #fff;
-}
-.btn-edit {
-  border: 1px solid #cbd5e1;
-  color: #1e293b;
-}
-.btn-edit:hover {
-  background: #f1f5f9;
-}
-.btn-delete {
-  border: 1px solid #fca5a5;
-  color: #dc2626;
-}
-.btn-delete:hover {
-  background: #fef2f2;
-}
-.btn-delete:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.btn-dl {
-  padding: 0.7rem 1.1rem;
-  background: #2563eb;
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.btn-dl:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 .msg {
   margin: 0;
@@ -522,5 +433,139 @@ h2 {
 .empty {
   margin: 0;
   font-size: 0.9rem;
+  padding: 2.5rem 1rem;
+  text-align: center;
+  background: #f8fafc;
+  border-radius: 10px;
+  border: 1px dashed #d8dee8;
+}
+
+/* --- 하단 고정 도구 (ChordEditor와 동일한 톤) --- */
+.bottom-tools {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: #fff;
+  border: 1px solid #e2e6ef;
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -4px 14px rgba(16, 24, 40, 0.08);
+  overflow: hidden;
+}
+.bt-panel {
+  padding: 0.85rem 0.9rem calc(0.85rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.bt-panel h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.btns {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.step {
+  padding: 0.5rem 0.85rem;
+  background: #1e293b;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.step:disabled {
+  opacity: 0.5;
+}
+.step.origin {
+  background: #0f766e;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.step.origin.active {
+  background: #0a5c55;
+  box-shadow: inset 0 0 0 2px #6ee7d5;
+}
+.transpose-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #0f766e;
+}
+.preview-chords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.preview-chip {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #818cf8;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.preview-more {
+  align-self: center;
+  color: #cbd5e1;
+  font-size: 0.82rem;
+}
+.tool-divider {
+  height: 1px;
+  background: #e2e6ef;
+  margin: 0.1rem 0;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.actions-spacer {
+  flex: 1;
+  min-width: 0.5rem;
+}
+.btn-edit,
+.btn-delete {
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+  background: #fff;
+}
+.btn-edit {
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+}
+.btn-edit:hover {
+  background: #f1f5f9;
+}
+.btn-delete {
+  border: 1px solid #fca5a5;
+  color: #dc2626;
+}
+.btn-delete:hover {
+  background: #fef2f2;
+}
+.btn-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-dl {
+  padding: 0.6rem 1rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-dl:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 </style>
