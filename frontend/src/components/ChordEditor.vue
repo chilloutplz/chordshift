@@ -28,6 +28,10 @@ const ocrError = ref('')
 const ocrQueueInfo = ref(null)
 // 이 시트에 대해 OCR을 이미 한 번이라도 실행한 적 있는지
 const ocrHasRun = ref(!!(props.sheet.chords?.length || props.sheet.ocr_raw_text))
+// 저장 안 된 변경사항 추적용 dirty 플래그 - 뒤로가기/앱 종료 시 경고용
+const dirty = ref(false)
+// 앱 안에서 화면을 가로로 돌려보는 모드 (기기 자체 회전과 무관하게 CSS로 구현)
+const landscapeMode = ref(false)
 const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
@@ -172,7 +176,7 @@ function nudgeLine(dx, dy) {
     L.xEnd = newXStart + width
     L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy))
   }
-  saveLines()
+  dirty.value = true
 }
 
 // 줄의 프레임은 그대로 두고, 그 안의 코드들만 좌우로 같이 이동
@@ -185,7 +189,7 @@ function nudgeChords(dt) {
       it.t = Math.min(0.98, Math.max(0.02, cur + dt))
     }
   }
-  saveLines()
+  dirty.value = true
 }
 
 // --- 저장 시 제목 입력 모달 ---
@@ -430,6 +434,8 @@ watch(() => props.sheet, (s) => {
   } else if (s.chordFontSize) {
     chordFontPx.value = s.chordFontSize
   }
+  // 서버(부모)로부터 받은 최신 상태로 갱신된 시점이므로 "저장 안 된 변경"은 없다
+  dirty.value = false
 }, { immediate: true })
 
 const paletteChords = computed(() => {
@@ -468,6 +474,14 @@ function normFromEvent(e) {
 
 function startDrag(e, type, lineId, itemId = null) {
   if (placeChord.value) return
+  // --- Line 작업 / Chord 작업 모드 분리 ---
+  // 모바일에서 줄 핸들과 코드 칩 드래그가 같은 영역에 겹쳐 있어서
+  // 오동작이 잦았다. 하단 탭("코드 배치" / "위치 조정")을 곧 "지금 무엇을
+  // 다루는 중인가"의 모드로 삼아서, 그 모드에 해당하지 않는 제스처는
+  // 아예 시작조차 하지 않도록 한다.
+  const isLineOp = type !== 'chord-x'
+  if (isLineOp && bottomTab.value !== 'adjust') return
+  if (!isLineOp && bottomTab.value !== 'place') return
   // 주의: 여기서 e.preventDefault()를 호출하면 안 된다 -
   // 터치 환경에서 pointerdown에 preventDefault를 걸면 브라우저가 그 터치에서
   // 파생되는 click/dblclick 합성 이벤트 자체를 만들지 않아서, 더블탭으로
@@ -507,8 +521,7 @@ function startDrag(e, type, lineId, itemId = null) {
   }
   // 클릭/탭인지 실제 드래그인지 구분하는 최소 이동 거리(px).
   // 이게 없으면 손가락/마우스의 미세한 떨림도 "이동"으로 잡혀서
-  // 단순 클릭에도 saveLines()가 호출되고, 그로 인한 리렌더가
-  // 더블클릭(더블탭) 판정을 깨버리는 문제가 있었다.
+  // 클릭하려던 코드/줄이 의도치 않게 살짝 밀리는 문제가 있었다.
   const DRAG_THRESHOLD_PX = 4
   const onMove = (ev) => {
     if (!drag.value) return
@@ -541,13 +554,10 @@ function startDrag(e, type, lineId, itemId = null) {
     }
 
     if (t === 'line-body') {
-      const dx = pos.x - drag.value.startX
+      // 손가락 드래그는 세로 이동만 반영한다 - 가로는 터치로 정밀하게
+      // 맞추기 어려워서 오히려 오동작을 유발하므로, 가로 이동이 필요하면
+      // "위치 조정" 탭의 ← → 버튼(정밀 이동)을 쓰도록 분리했다.
       const dy = pos.y - drag.value.startY
-      const width = drag.value.origXEnd - drag.value.origXStart
-      let newXStart = drag.value.origXStart + dx
-      newXStart = Math.max(0.005, Math.min(0.995 - width, newXStart))
-      line.xStart = newXStart
-      line.xEnd = newXStart + width
       line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
     } else if (t === 'line-h-top') {
       const origBottom = drag.value.origY + drag.value.origHeight / 2
@@ -581,9 +591,8 @@ function startDrag(e, type, lineId, itemId = null) {
   const onUp = () => {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
-    const didMove = drag.value?.moved
+    if (drag.value?.moved) dirty.value = true
     drag.value = null
-    if (didMove) saveLines()
   }
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
@@ -621,7 +630,7 @@ function onStageClick(e) {
     })
     activeLineId.value = target.id
     message.value = `"${ch}" 코드줄에 삽입`
-    saveLines()
+    dirty.value = true
     return
   }
 
@@ -633,7 +642,7 @@ function onStageClick(e) {
   lines.value.push(line)
   activeLineId.value = line.id
   message.value = `"${ch}" 새 코드줄에 삽입`
-  saveLines()
+  dirty.value = true
 }
 
 function onLineClick(e, line) {
@@ -655,7 +664,7 @@ function onLineClick(e, line) {
   const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - L.xStart) / span))
   L.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t: tNorm, manual: true })
   message.value = `"${placeChord.value}" 코드줄에 삽입`
-  saveLines()
+  dirty.value = true
 }
 
 // 네이티브 dblclick은 모바일에서 touch-action:none 때문에 발생하지 않으므로
@@ -706,9 +715,9 @@ function confirmEdit(lineId, item) {
   const it = L?.items?.find(x => x.id === item.id)
   if (it) {
     it.chord = editValue.value.trim() || it.chord
+    dirty.value = true
   }
   editKey.value = null
-  saveLines()
 }
 function removeItem(line, itemId) {
   const L = lines.value.find(x => x.id === line.id)
@@ -719,7 +728,7 @@ function removeItem(line, itemId) {
     selectedLineIds.value = selectedLineIds.value.filter((id) => id !== L.id)
     if (activeLineId.value === L.id) activeLineId.value = null
   }
-  saveLines()
+  dirty.value = true
 }
 function pickRoot(root) {
   selectedRoot.value = root
@@ -751,18 +760,36 @@ function onKeydownEsc(e) {
   }
 }
 
+// 저장 안 된 변경사항이 있는 채로 앱을 벗어나려 할 때(모바일 뒤로가기,
+// 탭 닫기, 새로고침 등) 브라우저 표준 경고창을 띄운다.
+function handleBeforeUnload(e) {
+  if (!dirty.value) return
+  e.preventDefault()
+  e.returnValue = ''
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydownEsc)
   window.addEventListener('pointermove', onGlobalPointerMove)
   window.addEventListener('pointerup', onGlobalPointerUp)
   window.addEventListener('pointercancel', onGlobalPointerUp)
+  window.addEventListener('beforeunload', handleBeforeUnload)
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydownEsc)
   window.removeEventListener('pointermove', onGlobalPointerMove)
   window.removeEventListener('pointerup', onGlobalPointerUp)
   window.removeEventListener('pointercancel', onGlobalPointerUp)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
 })
+// 앱 안의 "목록" 버튼도 마찬가지로 - 저장 안 된 변경사항이 있으면 한 번 확인
+function handleBackClick() {
+  if (dirty.value) {
+    const ok = window.confirm('저장하지 않은 변경사항이 있습니다. 그래도 나가시겠어요?')
+    if (!ok) return
+  }
+  emit('back')
+}
 function addEmptyLine() {
   const line = {
     id: 'L' + Date.now().toString(36),
@@ -771,9 +798,11 @@ function addEmptyLine() {
   }
   lines.value.push(line)
   activeLineId.value = line.id
+  dirty.value = true
 }
 function bumpFont(delta) {
   chordFontPx.value = Math.min(22, Math.max(9, chordFontPx.value + delta))
+  dirty.value = true
 }
 
 async function saveLines() {
@@ -924,10 +953,10 @@ const statusBanner = computed(() => {
 </script>
 
 <template>
-  <div class="editor">
+  <div class="editor" :class="{ landscape: landscapeMode }">
     <!-- 상단 미니 툴바: 뒤로가기 / OCR / 저장 한 줄로 -->
     <div class="top-bar">
-      <button class="icon-btn" title="목록" aria-label="목록" @click="emit('back')">
+      <button class="icon-btn" title="목록" aria-label="목록" @click="handleBackClick">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
@@ -937,6 +966,18 @@ const statusBanner = computed(() => {
       </button>
       <button class="save-pill" :disabled="confirming || !lines.length" @click="handleSaveClick">
         {{ confirming ? '저장 중…' : '저장' }}
+      </button>
+      <button
+        class="icon-btn"
+        :class="{ on: landscapeMode }"
+        title="가로 화면으로 보기"
+        aria-label="가로 화면 전환"
+        @click="landscapeMode = !landscapeMode"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="2" y="6" width="20" height="12" rx="2.5" stroke="currentColor" stroke-width="2" />
+          <path d="M22 10v4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
       </button>
     </div>
 
@@ -967,8 +1008,14 @@ const statusBanner = computed(() => {
         </button>
       </div>
       <div ref="stageFrameRef" class="stage-frame" @pointerdown.capture="onStagePointerDownCapture">
-        <div ref="stageRef" class="stage" :class="{ placing: !!placeChord }" :style="stageStyle" @click="onStageClick">
-          <img :src="imageUrl" class="score-img" draggable="false" alt="악보" />
+        <div
+          ref="stageRef"
+          class="stage"
+          :class="{ placing: !!placeChord, 'mode-line': bottomTab === 'adjust', 'mode-chord': bottomTab === 'place' }"
+          :style="stageStyle"
+          @click="onStageClick"
+        >
+          <img :src="imageUrl" class="score-img" draggable="false" @dragstart.prevent alt="악보" />
           <div v-if="ocrLoading" class="ocr-scan-overlay">
             <div class="ocr-scan-info">
               <span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" />
@@ -997,13 +1044,10 @@ const statusBanner = computed(() => {
             <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
             <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
             <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
-            <div class="move-hint" title="드래그해서 코드줄 전체 이동">
+            <div class="move-hint" title="드래그해서 코드줄 위아래로 이동">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="5 9 2 12 5 15" />
                 <polyline points="9 5 12 2 15 5" />
                 <polyline points="15 19 12 22 9 19" />
-                <polyline points="19 9 22 12 19 15" />
-                <line x1="2" y1="12" x2="22" y2="12" />
                 <line x1="12" y1="2" x2="12" y2="22" />
               </svg>
             </div>
@@ -1185,6 +1229,24 @@ const statusBanner = computed(() => {
   max-width: 920px;
   margin: 0 auto;
 }
+/* 앱 안 가로 보기 모드 - 기기 자체 회전과 무관하게 화면 전체를 90도 돌려서
+   가로로 넓게 쓸 수 있게 한다. (네이티브 화면 회전에 의존하지 않는 방식) */
+.editor.landscape {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  width: 100vh;
+  height: 100vw;
+  max-width: none;
+  margin: 0;
+  transform-origin: top left;
+  transform: rotate(90deg) translateY(-100%);
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg, #f4f6fa);
+  padding: 0.65rem 0.65rem calc(0.65rem + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+}
 
 /* --- 상단 미니 툴바 --- */
 .top-bar {
@@ -1206,6 +1268,12 @@ const statusBanner = computed(() => {
   cursor: pointer;
 }
 .icon-btn:hover { background: #f1f5f9; }
+.icon-btn.on {
+  background: #0d6efd;
+  border-color: #0d6efd;
+  color: #fff;
+}
+.icon-btn.on:hover { background: #0b5ed7; }
 .ocr-pill {
   flex: 1;
   min-width: 0;
@@ -1378,12 +1446,20 @@ const statusBanner = computed(() => {
   box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 .stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
+/* 코드 모드: 줄 핸들/몸통 드래그 비활성 - 아예 안 보이게 해서 오터치 여지 자체를 없앤다 */
+.stage.mode-chord .handle { display: none; }
+.stage.mode-chord .chord-line { cursor: default; }
+/* 줄 모드: 칩 드래그 비활성 - 잡을 수 없다는 걸 커서로 표시 (더블탭 수정/삭제는 계속 가능) */
+.stage.mode-line .chip { cursor: default; }
 .score-img {
   display: block;
   width: 100%;
   height: auto;
   vertical-align: top;
   pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+  -webkit-touch-callout: none;
 }
 .chord-line {
   position: absolute;
@@ -1418,21 +1494,21 @@ const statusBanner = computed(() => {
 }
 .handle.left { left: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
 .handle.right { right: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
-.handle.top { top: -9px; left: 0; right: 0; height: 18px; cursor: ns-resize; }
-.handle.bottom { bottom: -9px; left: 0; right: 0; height: 18px; cursor: ns-resize; }
+.handle.top { top: 0; left: 0; right: 0; height: 8px; cursor: ns-resize; }
+.handle.bottom { bottom: 0; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .handle.top::after,
 .handle.bottom::after {
   content: '';
   position: absolute;
   left: 20%;
   right: 20%;
-  height: 2px;
-  top: 50%;
-  transform: translateY(-50%);
+  height: 1.5px;
   background: #0d6efd;
   border-radius: 2px;
-  opacity: 0.9;
+  opacity: 0.85;
 }
+.handle.top::after { top: 0; }
+.handle.bottom::after { bottom: 0; }
 .handle.left::after,
 .handle.right::after {
   content: '';
