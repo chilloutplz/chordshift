@@ -1241,8 +1241,13 @@ const statusBanner = computed(() => {
   margin: 0;
   transform-origin: top left;
   transform: rotate(90deg) translateY(-100%);
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 90도 회전된 상태에서는 실제 세로 스와이프가 가로축 스크롤로 먹히는
+     경우가 있어(브라우저마다 다름), 한쪽만 허용하면 스크롤이 아예 안 먹는
+     문제가 있었다. 양쪽 다 열어서 어느 방향으로 스와이프해도 스크롤되게 한다. */
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
   background: var(--bg, #f4f6fa);
   padding: 0.65rem 0.65rem calc(0.65rem + env(safe-area-inset-bottom));
   box-sizing: border-box;
@@ -1613,6 +1618,15 @@ const statusBanner = computed(() => {
   border-radius: 12px 12px 0 0;
   box-shadow: 0 -4px 14px rgba(16, 24, 40, 0.08);
   overflow: hidden;
+}
+/* 가로모드에서는 .editor.landscape 자체에 transform(rotate)이 걸려있는데,
+   position:sticky는 transform이 걸린 조상 안에서는 containing block 계산이
+   깨져서 아예 렌더링되지 않는(사라지는) 문제가 있다. 가로모드에서는 sticky를
+   포기하고 그냥 일반 흐름 요소로 두어 스크롤해서 도달하도록 한다. */
+.editor.landscape .bottom-tools {
+  position: static;
+  border-radius: 12px;
+  margin-top: 0.4rem;
 }
 .bt-tabs {
   display: flex;

@@ -1,10 +1,13 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import HomePage from './components/HomePage.vue'
 import ChordEditor from './components/ChordEditor.vue'
 import TransposePage from './components/TransposePage.vue'
 import HelpPage from './components/HelpPage.vue'
 import { apiFetch } from './api/api.js'
+// vite-plugin-pwa가 제공하는 가상 모듈. 개발 모드(devOptions.enabled=false)에서는
+// 아무 동작 안 하는 더미로 대체되므로 import 자체는 항상 안전하다.
+import { registerSW } from 'virtual:pwa-register'
 
 /**
  * 커피 한 잔 기부 링크
@@ -18,6 +21,40 @@ const page = ref('home')
 const currentSheet = ref(null)
 const ocrUsage = ref(null)
 const previousPage = ref('home') // 도움말 진입 전 화면 - 도움말에서 뒤로가면 여기로 복귀
+
+// --- PWA 새 버전 배포 알림 ---
+// 새 버전이 배포되면 서비스워커가 백그라운드에서 감지해 onNeedRefresh를 호출한다.
+// registerType: 'prompt'라 자동으로 적용되지 않고, 사용자가 배너에서 새로고침을 눌러야 반영된다.
+// (작업 중에 갑자기 화면이 새로고침되는 걸 막기 위함)
+const updateAvailable = ref(false)
+let applyUpdate = () => {}
+let swRegistration = null
+
+applyUpdate = registerSW({
+  onNeedRefresh() {
+    updateAvailable.value = true
+  },
+  onRegistered(registration) {
+    swRegistration = registration || null
+  },
+})
+
+function reloadForUpdate() {
+  updateAvailable.value = false
+  applyUpdate(true)
+}
+
+// 앱을 계속 켜두고만 있으면 새 버전이 배포돼도 알아챌 기회가 없어서,
+// "완전히 껐다 켜야만" 반영되는 문제가 있었다. 화면이 다시 보일 때마다
+// (다른 앱 갔다 오거나 화면을 껐다 켤 때) 능동적으로 업데이트를 확인해서
+// 배너가 훨씬 빨리 뜨도록 한다.
+function checkForUpdate() {
+  if (swRegistration) swRegistration.update().catch(() => {})
+}
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') checkForUpdate()
+}
+let updateCheckInterval = null
 // ChordEditor에서 뒤로가기 눌렀을 때 갈 곳.
 // 신규 업로드(temp)로 들어온 거면 아직 저장된 곡이 없어 'home'으로,
 // 이미 저장된 곡을 "수정"으로 들어온 거면 'transpose'로 돌아간다.
@@ -82,7 +119,16 @@ function goCorrect() {
   page.value = 'correct'
 }
 
-onMounted(loadOcrUsage)
+onMounted(() => {
+  loadOcrUsage()
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  // 화면을 계속 켜놓고 있을 경우를 대비한 보조 수단 - 30분마다도 확인
+  updateCheckInterval = setInterval(checkForUpdate, 30 * 60 * 1000)
+})
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  if (updateCheckInterval) clearInterval(updateCheckInterval)
+})
 </script>
 
 <template>
@@ -120,6 +166,11 @@ onMounted(loadOcrUsage)
         </div>
       </div>
     </header>
+
+    <div v-if="updateAvailable" class="update-banner">
+      <span>새 버전이 있어요.</span>
+      <button type="button" @click="reloadForUpdate">새로고침해서 적용</button>
+    </div>
 
     <main class="main">
       <HomePage v-if="page === 'home'" @open="openSheet" @usage-updated="loadOcrUsage" />
@@ -173,6 +224,35 @@ onMounted(loadOcrUsage)
   padding: 0.75rem 0 1rem;
   margin-bottom: 0.25rem;
   border-bottom: 1px solid var(--border, #e2e6ef);
+}
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.9rem;
+  margin: 0.5rem 0 0;
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #0d6efd;
+  flex-wrap: wrap;
+}
+.update-banner button {
+  padding: 0.35rem 0.75rem;
+  border: none;
+  border-radius: 999px;
+  background: #0d6efd;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.update-banner button:hover {
+  background: #1d4ed8;
 }
 
 .brand {
