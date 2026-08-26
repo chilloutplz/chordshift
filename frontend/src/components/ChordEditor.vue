@@ -134,13 +134,13 @@ function measureStageWidth() {
 }
 
 const displayFontPx = computed(() => {
+  // A-/A+ (chordFontPx) 변화가 그대로 체감되도록 최소값으로 덮지 않음
   const base = chordFontPx.value * zoom.value
-  const scale = Math.min(2.4, Math.max(1, stageWidthPx.value / DISPLAY_FONT_REF_W))
-  let px = base * scale
-  if (landscapeMode.value || preferMobileLandscape()) {
-    px = Math.max(px, 18 * zoom.value * Math.min(scale, 1.8))
-  }
-  return Math.round(Math.min(42, px))
+  const scale = Math.min(2.2, Math.max(1, stageWidthPx.value / DISPLAY_FONT_REF_W))
+  // 가로·모바일은 살짝만 키움 (비율 유지 → 버튼 조절 유효)
+  const mobileBoost = (landscapeMode.value || preferMobileLandscape()) ? 1.12 : 1
+  const px = base * scale * mobileBoost
+  return Math.round(Math.min(48, Math.max(10, px)))
 })
 
 watch(landscapeMode, (on) => {
@@ -574,12 +574,34 @@ function stageRect() {
   return stageRef.value?.getBoundingClientRect()
 }
 
+function clampNorm(v) {
+  return Math.min(0.99, Math.max(0.01, v))
+}
+
+/**
+ * 포인터 → 스테이지 정규화 좌표 (0~1).
+ * 가로 모드는 .editor 에 rotate(90deg) 가 걸려 있어
+ * clientX/Y 와 로컬 x/y 축이 바뀐다. AABB 기준으로 역변환한다.
+ */
 function normFromEvent(e) {
-  const rect = stageRect()
-  if (!rect) return null
+  const el = stageRef.value
+  if (!el) return null
+  const rect = el.getBoundingClientRect()
+  if (!rect.width || !rect.height) return null
+
+  if (!landscapeMode.value) {
+    return {
+      x: clampNorm((e.clientX - rect.left) / rect.width),
+      y: clampNorm((e.clientY - rect.top) / rect.height),
+    }
+  }
+
+  // rotate(90deg) CW + origin top-left:
+  // 로컬 +x ≈ 화면 아래, 로컬 +y ≈ 화면 오른쪽 (AABB 기준)
+  // → 화면 Y 로 로컬 X, 화면 X 로 로컬 Y
   return {
-    x: Math.min(0.99, Math.max(0.01, (e.clientX - rect.left) / rect.width)),
-    y: Math.min(0.99, Math.max(0.01, (e.clientY - rect.top) / rect.height)),
+    x: clampNorm((e.clientY - rect.top) / rect.height),
+    y: clampNorm(1 - (e.clientX - rect.left) / rect.width),
   }
 }
 
@@ -903,7 +925,7 @@ function addEmptyLine() {
   dirty.value = true
 }
 function bumpFont(delta) {
-  chordFontPx.value = Math.min(22, Math.max(9, chordFontPx.value + delta))
+  chordFontPx.value = Math.min(28, Math.max(8, chordFontPx.value + delta))
   dirty.value = true
 }
 
