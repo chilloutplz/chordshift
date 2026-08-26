@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { apiFetch } from '@/api/api.js'
 
 const props = defineProps({ sheet: { type: Object, required: true } })
@@ -21,24 +21,64 @@ function normalizeSemitones(n) {
   return n
 }
 
+/** OCR/입력 슬래시 유사 문자 → '/' 정규화 (전각／, ∕, ⁄ 등) */
+function normalizeSlash(s) {
+  return String(s || '')
+    .replace(/[／∕⁄｜|\\]/g, '/')
+    .replace(/\s*\/\s*/g, '/')
+    .trim()
+}
+
 function transposeChordName(name, semitones) {
-  if (!name || !semitones) return name
-  const s = String(name).trim()
+  if (!name) return name
+  // semitones === 0 이어도 슬래시 정규화는 해 둔다
+  let s = normalizeSlash(name)
+  if (!semitones) return s
+  // 슬래시 코드: 앞(코드) / 뒤(베이스) 모두 같은 반음만큼 이동
   if (s.includes('/')) {
-    return s.split('/').map((p) => transposeChordName(p, semitones)).join('/')
+    return s
+      .split('/')
+      .map((p) => transposeChordName(p.trim(), semitones))
+      .filter((p, i, arr) => p || i === 0) // 앞부분은 유지
+      .join('/')
   }
   const m = s.match(/^([A-Ga-g])([#b]?)(.*)$/)
   if (!m) return s
   const root = m[1].toUpperCase() + (m[2] || '')
   const idx = NOTE_IDX[root]
   if (idx === undefined) return s
-  return NOTES[(idx + (semitones % 12) + 12) % 12] + (m[3] || '')
+  const quality = m[3] || ''
+  // quality 안에 슬래시가 남은 경우 안전망 (D + "/E")
+  if (quality.includes('/')) {
+    const qi = quality.indexOf('/')
+    const qMain = quality.slice(0, qi)
+    const qBass = quality.slice(qi + 1)
+    const newRoot = NOTES[(idx + (semitones % 12) + 12) % 12]
+    const bass = qBass ? transposeChordName(qBass, semitones) : ''
+    return bass ? `${newRoot}${qMain}/${bass}` : `${newRoot}${qMain}`
+  }
+  return NOTES[(idx + (semitones % 12) + 12) % 12] + quality
 }
 
+/** 가장 위(y) · 왼쪽(t/x) 코드를 원곡 기준으로 사용. 배열 순서가 아님. */
 function firstChordName(chords) {
   if (!Array.isArray(chords) || !chords.length) return 'C'
+  // line 형식
+  if (chords[0] && typeof chords[0] === 'object' && Array.isArray(chords[0].items)) {
+    const lines = [...chords].sort((a, b) => (Number(a?.y) || 0) - (Number(b?.y) || 0))
+    for (const L of lines) {
+      const items = (L.items || []).filter((it) => (it?.chord || '').trim())
+      if (!items.length) continue
+      items.sort((a, b) => {
+        const pa = a.t != null ? Number(a.t) : a.x != null ? Number(a.x) : 0.5
+        const pb = b.t != null ? Number(b.t) : b.x != null ? Number(b.x) : 0.5
+        return pa - pb
+      })
+      return items[0].chord || 'C'
+    }
+    return 'C'
+  }
   const first = chords[0]
-  if (first?.items?.length) return first.items[0].chord || 'C'
   if (typeof first === 'string') return first
   return first?.chord || 'C'
 }
@@ -64,6 +104,144 @@ const renderFailed = ref(false)
 /** data: URL 또는 빈 문자열 — 서버에 저장하지 않음 */
 const previewUrl = ref('')
 const currentLabel = ref('')
+/** 악보만 전체 화면으로 보기 (+ 핀치 줌 / 드래그 팬) */
+const fullscreen = ref(false)
+const FS_ZOOM_MIN = 1
+const FS_ZOOM_MAX = 4
+const fsZoom = ref(1)
+const fsPanX = ref(0)
+const fsPanY = ref(0)
+const fsImgStyle = computed(() => ({
+  transform: `translate(${fsPanX.value}px, ${fsPanY.value}px) scale(${fsZoom.value})`,
+  transformOrigin: 'center center',
+  touchAction: 'none',
+  cursor: fsZoom.value > 1 ? 'grab' : 'zoom-out',
+}))
+
+// 핀치/팬 상태 (오버레이 전용)
+const fsPointers = new Map()
+let fsPinchStartDist = 0
+let fsPinchStartZoom = 1
+let fsPanLast = null // { x, y } 단일 포인터 드래그
+let fsDidGesture = false // 제스처 후 click으로 닫히지 않게
+
+function fsPointerDist(pts) {
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+}
+
+function clampFsZoom(z) {
+  return Math.min(FS_ZOOM_MAX, Math.max(FS_ZOOM_MIN, +z.toFixed(3)))
+}
+
+function resetFsView() {
+  fsZoom.value = 1
+  fsPanX.value = 0
+  fsPanY.value = 0
+  fsPointers.clear()
+  fsPinchStartDist = 0
+  fsPanLast = null
+  fsDidGesture = false
+}
+
+function openFullscreen() {
+  if (!previewUrl.value) return
+  resetFsView()
+  fullscreen.value = true
+  document.body.style.overflow = 'hidden'
+}
+function closeFullscreen() {
+  fullscreen.value = false
+  resetFsView()
+  document.body.style.overflow = ''
+}
+
+function onFsPointerDown(e) {
+  // 닫기 버튼은 무시
+  if (e.target?.closest?.('.fs-close')) return
+  e.currentTarget.setPointerCapture?.(e.pointerId)
+  fsPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  if (fsPointers.size === 2) {
+    fsPinchStartDist = fsPointerDist([...fsPointers.values()])
+    fsPinchStartZoom = fsZoom.value
+    fsPanLast = null
+  } else if (fsPointers.size === 1) {
+    fsPanLast = { x: e.clientX, y: e.clientY }
+  }
+}
+
+function onFsPointerMove(e) {
+  if (!fsPointers.has(e.pointerId)) return
+  fsPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+  if (fsPointers.size >= 2 && fsPinchStartDist > 0) {
+    const dist = fsPointerDist([...fsPointers.values()])
+    const next = clampFsZoom(fsPinchStartZoom * (dist / fsPinchStartDist))
+    if (Math.abs(next - fsZoom.value) > 0.001) fsDidGesture = true
+    fsZoom.value = next
+    if (fsZoom.value <= 1.01) {
+      fsZoom.value = 1
+      fsPanX.value = 0
+      fsPanY.value = 0
+    }
+    return
+  }
+
+  // 확대 상태에서 한 손가락 팬
+  if (fsPointers.size === 1 && fsPanLast && fsZoom.value > 1.01) {
+    const dx = e.clientX - fsPanLast.x
+    const dy = e.clientY - fsPanLast.y
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) fsDidGesture = true
+    fsPanX.value += dx
+    fsPanY.value += dy
+    fsPanLast = { x: e.clientX, y: e.clientY }
+  }
+}
+
+function onFsPointerUp(e) {
+  fsPointers.delete(e.pointerId)
+  if (fsPointers.size < 2) fsPinchStartDist = 0
+  if (fsPointers.size === 1) {
+    const only = [...fsPointers.values()][0]
+    fsPanLast = { x: only.x, y: only.y }
+  } else {
+    fsPanLast = null
+  }
+}
+
+function onFsClick() {
+  // 핀치/팬 직후 합성 click 은 무시
+  if (fsDidGesture) {
+    fsDidGesture = false
+    return
+  }
+  // 1배율일 때만 탭으로 닫기 (확대 중에는 실수 방지)
+  if (fsZoom.value <= 1.01) closeFullscreen()
+}
+
+function fsZoomIn() {
+  fsZoom.value = clampFsZoom(fsZoom.value + 0.5)
+}
+function fsZoomOut() {
+  const z = clampFsZoom(fsZoom.value - 0.5)
+  fsZoom.value = z
+  if (z <= 1) {
+    fsPanX.value = 0
+    fsPanY.value = 0
+  }
+}
+
+function onKeydown(e) {
+  if (!fullscreen.value) return
+  if (e.key === 'Escape') closeFullscreen()
+  if (e.key === '+' || e.key === '=') fsZoomIn()
+  if (e.key === '-' || e.key === '_') fsZoomOut()
+  if (e.key === '0') resetFsView()
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  document.body.style.overflow = ''
+})
 
 // 가운데 "원곡(코드)" 버튼 라벨 - 항상 원본(0반음) 기준, 현재 위치와 무관하게 고정
 const originLabel = computed(() => `원곡(${keyLabel(props.sheet.chords || [], 0)})`)
@@ -265,10 +443,21 @@ async function deleteSong() {
           v-if="previewUrl"
           :src="previewUrl"
           alt="조옮김 결과"
+          class="result-img"
           :class="{ dim: imageLoading }"
           @load="onImageLoad"
           @error="onImageError"
+          @click="openFullscreen"
         />
+        <button
+          v-if="previewUrl && !imageLoading && !rendering"
+          type="button"
+          class="fs-hint"
+          @click="openFullscreen"
+          title="전체 화면"
+        >
+          ⛶ 전체 화면
+        </button>
       </div>
     </div>
     <p v-else class="muted empty">± 버튼으로 조옮김하면 결과가 여기에 표시됩니다.</p>
@@ -303,14 +492,55 @@ async function deleteSong() {
           </button>
           <div class="actions-spacer"></div>
           <button type="button" class="btn-edit" @click="emit('edit')">수정</button>
+          <button
+            type="button"
+            class="btn-fs"
+            :disabled="!previewUrl || rendering"
+            @click="openFullscreen"
+          >
+            전체 화면
+          </button>
           <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
             다운로드
           </button>
         </div>
       </div>
     </div>
+
+    <!-- 악보 전체 화면 오버레이 (핀치 줌 · 드래그 팬) -->
+    <Teleport to="body">
+      <div
+        v-if="fullscreen && previewUrl"
+        class="fs-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="악보 전체 화면"
+        @pointerdown="onFsPointerDown"
+        @pointermove="onFsPointerMove"
+        @pointerup="onFsPointerUp"
+        @pointercancel="onFsPointerUp"
+        @click="onFsClick"
+      >
+        <button type="button" class="fs-close" aria-label="닫기" @click.stop="closeFullscreen">
+          ✕
+        </button>
+        <div class="fs-zoom-bar" @click.stop @pointerdown.stop>
+          <button type="button" class="fs-zbtn" :disabled="fsZoom <= FS_ZOOM_MIN" @click="fsZoomOut">−</button>
+          <span class="fs-zval">{{ Math.round(fsZoom * 100) }}%</span>
+          <button type="button" class="fs-zbtn" :disabled="fsZoom >= FS_ZOOM_MAX" @click="fsZoomIn">+</button>
+        </div>
+        <img
+          :src="previewUrl"
+          alt="조옮김 결과 전체 화면"
+          class="fs-img"
+          :style="fsImgStyle"
+          draggable="false"
+        />
+      </div>
+    </Teleport>
   </div>
 </template>
+
 
 <style scoped>
 .page {
@@ -567,5 +797,138 @@ h2 {
 .btn-dl:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+.btn-fs {
+  padding: 0.6rem 1rem;
+  background: #fff;
+  color: #1e293b;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-fs:hover {
+  background: #f1f5f9;
+}
+.btn-fs:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.result-img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  display: block;
+  cursor: zoom-in;
+}
+.fs-hint {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  z-index: 3;
+  padding: 0.35rem 0.65rem;
+  border: none;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+.fs-hint:active {
+  transform: scale(0.97);
+}
+
+/* --- 전체 화면 오버레이 --- */
+.fs-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #0b0f17;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  overscroll-behavior: none;
+  touch-action: none;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.fs-close {
+  position: absolute;
+  top: max(0.75rem, env(safe-area-inset-top));
+  right: max(0.75rem, env(safe-area-inset-right));
+  z-index: 3;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fs-close:active {
+  background: rgba(255, 255, 255, 0.28);
+}
+.fs-zoom-bar {
+  position: absolute;
+  left: 50%;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(6px);
+  color: #fff;
+}
+.fs-zbtn {
+  width: 2.1rem;
+  height: 2.1rem;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.fs-zbtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.fs-zbtn:not(:disabled):active {
+  background: rgba(255, 255, 255, 0.28);
+}
+.fs-zval {
+  min-width: 3.2rem;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.fs-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none; /* 제스처는 오버레이에서 처리 */
+  will-change: transform;
+  transition: none;
 }
 </style>

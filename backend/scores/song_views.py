@@ -182,11 +182,22 @@ def song_from_temp(request):
         song.chord_font_size = font_size
         if meta:
             song.ocr_raw_text = meta.get('ocr_raw_text') or song.ocr_raw_text
+        # 보정 후 최종 chords 기준으로 원곡 키 재결정 (OCR 누락 보정 반영)
+        from .utils.chord_transpose import infer_original_key
+        song.original_key = infer_original_key(song.chords) or song.original_key
         with open(path, 'rb') as fh:
             song.original_image.save(path.name, File(fh), save=True)
         song.save()
     else:
-        song = Song(title=title, chords=chords or [], ocr_raw_text=(meta or {}).get('ocr_raw_text', ''), chord_font_size=font_size)
+        from .utils.chord_transpose import infer_original_key
+        key = infer_original_key(chords or [])
+        song = Song(
+            title=title,
+            chords=chords or [],
+            ocr_raw_text=(meta or {}).get('ocr_raw_text', ''),
+            chord_font_size=font_size,
+            original_key=key,
+        )
         with open(path, 'rb') as fh:
             song.original_image.save(path.name, File(fh), save=False)
         song.save()
@@ -386,6 +397,11 @@ class SongViewSet(viewsets.ModelViewSet):
         song = self.get_object()
         if 'chords' in request.data:
             song.chords = request.data['chords']
+            # 코드 보정 저장 시 원곡 키도 첫 코드 기준으로 갱신
+            from .utils.chord_transpose import infer_original_key
+            key = infer_original_key(song.chords)
+            if key:
+                song.original_key = key
         if 'title' in request.data:
             song.title = request.data['title']
         if 'chord_font_size' in request.data:
@@ -393,5 +409,7 @@ class SongViewSet(viewsets.ModelViewSet):
                 song.chord_font_size = int(request.data['chord_font_size'])
             except:
                 pass
+        if 'original_key' in request.data and request.data['original_key']:
+            song.original_key = str(request.data['original_key']).strip()
         song.save()
         return Response(SongSerializer(song, context={'request': request}).data)
