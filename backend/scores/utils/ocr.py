@@ -11,14 +11,30 @@ from pathlib import Path
 import requests
 from django.conf import settings
 
+# quality 조각 (루트 뒤)
+_QUALITY = (
+    r'(?:maj|min|dim|aug|sus|add|maj7|min7|m7|M7|dim7|sus2|sus4|add9|add11|m|M|°)?'
+    r'(?:\d{0,2})?'
+    r'(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9|add11)?'
+)
+# 루트 + quality (+ 선택적 슬래시 베이스)
+_ROOT = r'[A-G](?:#|b)?'
+_SLASH_CHARS = r'[／∕⁄｜|\\/]'
+
 CHORD_FULL = re.compile(
-    r'^([A-G](?:#|b)?(?:maj|min|m|dim|aug|sus|add|M|°)?(?:\d{1,2})?(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9|add11)?(?:/[A-G](?:#|b)?)?)$',
+    rf'^({_ROOT}{_QUALITY})(?:{_SLASH_CHARS}({_ROOT}))?$',
     re.IGNORECASE,
 )
+# 텍스트 중간에서도 D/E, D／E, D / E 형태를 잡음 (\b 만으로는 / 주변이 깨지기 쉬움)
 CHORD_IN_TEXT = re.compile(
-    r'\b([A-G](?:#|b)?(?:maj|min|m|dim|aug|sus|add|M)?(?:\d{0,2})?(?:maj7|min7|m7|M7|dim7|sus2|sus4|add9)?(?:/[A-G](?:#|b)?)?)\b',
+    rf'(?<![A-Za-z0-9])({_ROOT}{_QUALITY})(?:\s*{_SLASH_CHARS}\s*({_ROOT}))?(?![A-Za-z0-9])',
     re.IGNORECASE,
 )
+
+# 슬래시 단독 토큰
+SLASH_ONLY = re.compile(rf'^{_SLASH_CHARS}$')
+# 베이스로 쓸 수 있는 단순 루트 (A, F#, Bb)
+BASS_ONLY = re.compile(rf'^{_ROOT}$', re.IGNORECASE)
 
 LINE_Y_THRESHOLD = 0.025  # 같은 줄 판단 y 차이
 
@@ -39,11 +55,30 @@ class OcrConfigError(Exception):
     pass
 
 
+def _normalize_chord_token(token: str) -> str:
+    """전각 슬래시·공백 정리: 'D／E', 'D / E' → 'D/E'"""
+    if not token:
+        return ''
+    t = token.strip()
+    t = re.sub(_SLASH_CHARS, '/', t)
+    t = re.sub(r'\s*/\s*', '/', t)
+    t = re.sub(r'\s+', '', t)  # 코드 안 공백 제거 (D m → 유지하지 않음: quality는 보통 붙음)
+    return t
+
+
 def _looks_like_chord(token: str) -> bool:
-    token = (token or '').strip()
-    if not token or len(token) > 12:
+    token = _normalize_chord_token(token or '')
+    if not token or len(token) > 14:
         return False
     return bool(CHORD_FULL.match(token))
+
+
+def _format_chord_match(root_part: str, bass_part: str | None = None) -> str:
+    root_part = _normalize_chord_token(root_part)
+    if bass_part:
+        bass_part = _normalize_chord_token(bass_part)
+        return f'{root_part}/{bass_part}'
+    return root_part
 
 
 def _vertices_to_norm(vertices, img_w: int, img_h: int):
@@ -69,28 +104,144 @@ def _vertices_to_norm(vertices, img_w: int, img_h: int):
 
 
 def _flat_chord_hits(ocr_lines: list) -> list:
+    """Vision 단어 단위 결과에서 코드 후보 + 슬래시 토큰 추출."""
     hits = []
     for line in ocr_lines:
         text = (line.get('text') or '').strip()
+        if not text:
+            continue
         norm = line.get('norm')
         conf = line.get('confidence', 0.9)
         y = (norm or {}).get('y', 0.1)
         x = (norm or {}).get('x', 0.05)
-        if _looks_like_chord(text):
-            hits.append({'chord': text, 'x': x, 'y': y, 'confidence': conf})
+        w = (norm or {}).get('w', 0.02)
+
+        # 1) 슬래시만 있는 토큰 → 이후 병합용 마커
+        if SLASH_ONLY.match(text):
+            hits.append({
+                'chord': '/',
+                'x': x,
+                'y': y,
+                'confidence': conf,
+                'is_slash': True,
+            })
             continue
+
+        # 2) 토큰 전체가 코드 (D, F#m, D/E, D／E …)
+        normed = _normalize_chord_token(text)
+        if _looks_like_chord(normed):
+            hits.append({
+                'chord': normed,
+                'x': x,
+                'y': y,
+                'confidence': conf,
+                'is_slash': False,
+            })
+            continue
+
+        # 3) 긴 텍스트 안에서 코드 패턴 검색 (가사+코드 혼재)
         for m in CHORD_IN_TEXT.finditer(text):
-            token = m.group(1)
+            root_part = m.group(1)
+            bass_part = m.group(2) if m.lastindex and m.lastindex >= 2 else None
+            token = _format_chord_match(root_part, bass_part)
             if not _looks_like_chord(token):
                 continue
             if norm:
                 ratio = m.start() / max(len(text), 1)
-                cx = round(norm['x'] + norm['w'] * ratio, 5)
-                cy = norm['y']
+                cx = round(norm['x'] + w * ratio, 5)
+                cy = y
             else:
                 cx, cy = 0.05, 0.1
-            hits.append({'chord': token, 'x': cx, 'y': cy, 'confidence': conf})
+            hits.append({
+                'chord': token,
+                'x': cx,
+                'y': cy,
+                'confidence': conf,
+                'is_slash': False,
+            })
     return hits
+
+
+# 같은 줄로 보고 슬래시 병합할 최대 x 간격 (정규화 좌표)
+SLASH_MERGE_DX = 0.045
+SLASH_MERGE_DY = 0.02
+
+
+def _merge_slash_hits(hits: list) -> list:
+    """인접 토큰을 슬래시 코드로 합친다.
+
+    Vision 은 'D' '/' 'E' 또는 'D' 'E' 로 쪼개는 경우가 많다.
+    - 사이에 '/' 마커가 있으면 무조건 병합
+    - '/' 없이도 매우 가깝고 오른쪽이 단순 루트(베이스)이면 병합
+    """
+    if not hits:
+        return []
+
+    ordered = sorted(hits, key=lambda h: (h.get('y', 0), h.get('x', 0)))
+    out = []
+    i = 0
+    n = len(ordered)
+    while i < n:
+        cur = ordered[i]
+        if cur.get('is_slash'):
+            # 단독 슬래시는 코드가 아님 — 앞뒤 병합에서만 사용, 남기지 않음
+            i += 1
+            continue
+
+        # 이미 D/E 형태면 그대로
+        chord = cur.get('chord') or ''
+        if '/' in chord:
+            out.append({**cur, 'is_slash': False})
+            i += 1
+            continue
+
+        # 다음이 슬래시 마커 → 그 다음 코드와 병합
+        if i + 1 < n and ordered[i + 1].get('is_slash'):
+            if i + 2 < n and not ordered[i + 2].get('is_slash'):
+                nxt = ordered[i + 2]
+                if abs(nxt['y'] - cur['y']) <= SLASH_MERGE_DY:
+                    bass = (nxt.get('chord') or '').split('/')[0]
+                    if BASS_ONLY.match(_normalize_chord_token(bass)) or _looks_like_chord(bass):
+                        merged = {
+                            'chord': f"{chord}/{_normalize_chord_token(bass)}",
+                            'x': cur['x'],
+                            'y': (cur['y'] + nxt['y']) / 2,
+                            'confidence': min(cur.get('confidence', 1), nxt.get('confidence', 1)),
+                            'is_slash': False,
+                        }
+                        out.append(merged)
+                        i += 3
+                        continue
+            i += 1
+            continue
+
+        # 슬래시 없이 바로 다음 토큰이 가까운 단순 베이스
+        if i + 1 < n and not ordered[i + 1].get('is_slash'):
+            nxt = ordered[i + 1]
+            dx = nxt['x'] - cur['x']
+            dy = abs(nxt['y'] - cur['y'])
+            bass = _normalize_chord_token((nxt.get('chord') or '').split('/')[0])
+            # 오른쪽·같은 높이·간격 좁음·베이스는 루트만 (C, F# …)
+            if (
+                0 < dx <= SLASH_MERGE_DX
+                and dy <= SLASH_MERGE_DY
+                and BASS_ONLY.match(bass)
+                and '/' not in (nxt.get('chord') or '')
+            ):
+                merged = {
+                    'chord': f'{chord}/{bass}',
+                    'x': cur['x'],
+                    'y': (cur['y'] + nxt['y']) / 2,
+                    'confidence': min(cur.get('confidence', 1), nxt.get('confidence', 1)),
+                    'is_slash': False,
+                }
+                out.append(merged)
+                i += 2
+                continue
+
+        out.append({**cur, 'is_slash': False})
+        i += 1
+    return out
 
 
 def group_hits_into_lines(hits: list) -> list:
@@ -281,6 +432,7 @@ def run_ocr(image_path: str) -> dict:
         raw_texts = [l['text'] for l in ocr_lines]
 
     hits = _flat_chord_hits(ocr_lines)
+    hits = _merge_slash_hits(hits)
     lines = group_hits_into_lines(hits)
 
     return {

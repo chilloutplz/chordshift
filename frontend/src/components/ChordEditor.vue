@@ -31,7 +31,19 @@ const ocrHasRun = ref(!!(props.sheet.chords?.length || props.sheet.ocr_raw_text)
 // 저장 안 된 변경사항 추적용 dirty 플래그 - 뒤로가기/앱 종료 시 경고용
 const dirty = ref(false)
 // 앱 안에서 화면을 가로로 돌려보는 모드 (기기 자체 회전과 무관하게 CSS로 구현)
-const landscapeMode = ref(false)
+function preferMobileLandscape() {
+  if (typeof window === 'undefined') return false
+  try {
+    if (window.matchMedia('(pointer: coarse)').matches) return true
+    if (window.matchMedia('(max-width: 900px)').matches) return true
+  } catch (_) {}
+  return false
+}
+/** 모바일 보정은 가로 모드를 주 작업으로 */
+const landscapeMode = ref(preferMobileLandscape())
+/** 가로 모드에서 하단 툴 접기 → 캔버스 최대화 */
+const toolsCollapsed = ref(false)
+
 const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
@@ -44,7 +56,7 @@ const chordFontPx = ref(13)
 const selectedRoot = ref(null)
 
 // --- 하단 도구 탭: 배치(코드 고르기) / 조정(이동·크기) ---
-const bottomTab = ref('place')
+const bottomTab = ref('adjust')
 watch(bottomTab, (tab) => {
   if (tab !== 'place') clearPlace()
 })
@@ -109,24 +121,41 @@ function onGlobalPointerUp(e) {
     pinchStartDist = 0
   }
 }
-// 화면에 보여줄 코드 글자 크기 = 저장용 기준 크기 × 확대 배율.
-// (서버에 저장되는 chordFontPx 자체는 건드리지 않고, 화면 표시만 확대에 맞춰 커짐)
-const displayFontPx = computed(() => Math.round(chordFontPx.value * zoom.value))
+// 화면에 보여줄 코드 글자 크기 (저장용 chordFontPx 와 별개)
+// 스테이지가 넓을수록(가로 풀폭) 비례 확대 — 악보 대비 너무 작아 보이지 않게
+const stageWidthPx = ref(640)
+const DISPLAY_FONT_REF_W = 640
 
-// --- 코드줄 다중 선택 (Shift+클릭, 모바일은 "Multi" 토글) ---
-const multiSelectMode = ref(false)
+function measureStageWidth() {
+  const el = stageRef.value
+  if (!el) return
+  const w = el.getBoundingClientRect().width
+  if (w > 40) stageWidthPx.value = w
+}
+
+const displayFontPx = computed(() => {
+  const base = chordFontPx.value * zoom.value
+  const scale = Math.min(2.4, Math.max(1, stageWidthPx.value / DISPLAY_FONT_REF_W))
+  let px = base * scale
+  if (landscapeMode.value || preferMobileLandscape()) {
+    px = Math.max(px, 18 * zoom.value * Math.min(scale, 1.8))
+  }
+  return Math.round(Math.min(42, px))
+})
+
+watch(landscapeMode, (on) => {
+  if (!on) toolsCollapsed.value = false
+  nextTick(() => measureStageWidth())
+})
+watch(zoom, () => nextTick(() => measureStageWidth()))
+
+// --- Layout: 줄 다중 선택 (탭할 때마다 선택/해제 토글이 기본) ---
 const selectedLineIds = ref([])
-const showLineHelp = ref(false) // Shift+클릭 안내를 기본적으로 숨기고 ? 버튼으로만 노출
 
-// 이동/좌우 툴이 실제로 작동할 대상 줄 id 목록.
-// 다중 선택된 게 있으면 그것들, 없으면 현재 활성(activeLineId) 하나.
-const targetLineIds = computed(() =>
-  selectedLineIds.value.length ? selectedLineIds.value : (activeLineId.value ? [activeLineId.value] : []),
-)
+const targetLineIds = computed(() => selectedLineIds.value)
 
 function isLineSelected(id) {
-  if (selectedLineIds.value.length) return selectedLineIds.value.includes(id)
-  return activeLineId.value === id
+  return selectedLineIds.value.includes(id)
 }
 
 function toggleLineSelection(id) {
@@ -139,15 +168,10 @@ function toggleLineSelection(id) {
   activeLineId.value = id
 }
 
-function toggleMultiSelectMode() {
-  multiSelectMode.value = !multiSelectMode.value
-  if (multiSelectMode.value) {
-    // 이미 선택되어 있던 줄이 있으면 다중 선택으로 그대로 이어받는다
-    if (activeLineId.value && !selectedLineIds.value.length) {
-      selectedLineIds.value = [activeLineId.value]
-    }
-  } else {
-    selectedLineIds.value = []
+function selectAllLines() {
+  selectedLineIds.value = lines.value.map((L) => L.id)
+  if (selectedLineIds.value.length) {
+    activeLineId.value = selectedLineIds.value[0]
   }
 }
 
@@ -164,19 +188,20 @@ function targetLines() {
   return lines.value.filter((L) => ids.includes(L.id))
 }
 
-// 줄 전체를 상하좌우로 이동 (프레임 xStart/xEnd/y를 함께 옮김 - 코드 간 간격 유지)
+// 세로: 줄 이동. 가로: 전체 폭 모드라 칩만 이동
 function nudgeLine(dx, dy) {
   const targets = targetLines()
   if (!targets.length) return
-  for (const L of targets) {
-    const width = (L.xEnd ?? 0.99) - (L.xStart ?? 0.01)
-    let newXStart = (L.xStart ?? 0.01) + dx
-    newXStart = Math.max(0.005, Math.min(0.995 - width, newXStart))
-    L.xStart = newXStart
-    L.xEnd = newXStart + width
-    L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy))
+  if (dx) {
+    const span = EDIT_X1 - EDIT_X0
+    nudgeChords(dx / span)
   }
-  dirty.value = true
+  if (dy) {
+    for (const L of targets) {
+      L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy))
+    }
+    dirty.value = true
+  }
 }
 
 // 줄의 프레임은 그대로 두고, 그 안의 코드들만 좌우로 같이 이동
@@ -352,11 +377,74 @@ function ensureItemT(items) {
   })
 }
 
+// 편집 중 코드줄은 항상 화면 전체 폭. 저장 시에만 첫~마지막 칩 구간으로 축소.
+const EDIT_X0 = 0.01
+const EDIT_X1 = 0.99
+const SAVE_LINE_PAD = 0.018
+const SAVE_MIN_SPAN = 0.06
+
+function expandLinesToFullWidth(list) {
+  const spanEdit = EDIT_X1 - EDIT_X0
+  return list.map((L) => {
+    const x0 = L.xStart ?? EDIT_X0
+    const x1 = L.xEnd ?? EDIT_X1
+    const span = Math.max(0.001, x1 - x0)
+    const items = (L.items || []).map((it) => {
+      const tOld = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+      const abs = x0 + tOld * span
+      const tNew = (abs - EDIT_X0) / spanEdit
+      return { ...it, t: Math.min(0.98, Math.max(0.02, tNew)) }
+    })
+    return { ...L, xStart: EDIT_X0, xEnd: EDIT_X1, items }
+  })
+}
+
+/** 저장용: 빈 줄 제거 + 줄마다 첫/마지막 칩 기준으로 xStart·xEnd 축소, t 재계산 */
+function compactLinesForSave(list) {
+  const out = []
+  for (const L of list) {
+    const items = (L.items || []).filter((it) => (it.chord || '').trim())
+    if (!items.length) continue
+    const x0 = L.xStart ?? EDIT_X0
+    const x1 = L.xEnd ?? EDIT_X1
+    const span = Math.max(0.001, x1 - x0)
+    const absItems = items.map((it) => {
+      const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+      return { it, abs: x0 + t * span }
+    })
+    absItems.sort((a, b) => a.abs - b.abs)
+    let newStart = absItems[0].abs - SAVE_LINE_PAD
+    let newEnd = absItems[absItems.length - 1].abs + SAVE_LINE_PAD
+    newStart = Math.max(0.005, newStart)
+    newEnd = Math.min(0.995, newEnd)
+    if (newEnd - newStart < SAVE_MIN_SPAN) {
+      const mid = (newStart + newEnd) / 2
+      newStart = Math.max(0.005, mid - SAVE_MIN_SPAN / 2)
+      newEnd = Math.min(0.995, newStart + SAVE_MIN_SPAN)
+    }
+    const newSpan = Math.max(0.001, newEnd - newStart)
+    out.push({
+      id: L.id,
+      y: L.y,
+      height: L.height ?? 0.032,
+      xStart: Math.round(newStart * 1e5) / 1e5,
+      xEnd: Math.round(newEnd * 1e5) / 1e5,
+      items: absItems.map(({ it, abs }) => ({
+        id: it.id,
+        chord: String(it.chord).trim(),
+        t: Math.min(0.98, Math.max(0.02, Math.round(((abs - newStart) / newSpan) * 1e5) / 1e5)),
+        ...(it.manual ? { manual: true } : {}),
+      })),
+    })
+  }
+  return out
+}
+
 function toLines(raw) {
   if (!Array.isArray(raw) || !raw.length) return []
   // 이미 lines 형식이면 그대로 (chord/text 호환)
   if (raw[0] && typeof raw[0] === 'object' && Array.isArray(raw[0].items)) {
-    return raw.map((L, i) => ({
+    return expandLinesToFullWidth(raw.map((L, i) => ({
       id: L.id || `L${i}`,
       y: L.y ?? 0.1 + i * 0.08,
       xStart: L.xStart ?? 0.01,
@@ -370,7 +458,7 @@ function toLines(raw) {
           manual: !!it.manual
         }))
       ),
-    }))
+    })))
   }
 
   // === 절대좌표 모드 ===
@@ -408,7 +496,7 @@ function toLines(raw) {
   }
   if (cur.length) groups.push(cur)
 
-  return groups.map((g, gi) => {
+  return expandLinesToFullWidth(groups.map((g, gi) => {
     g.sort((a,b) => a.x - b.x)
     const avgY = g.reduce((s,it)=>s+it.y,0)/g.length
     return {
@@ -423,7 +511,7 @@ function toLines(raw) {
         t: Math.min(0.98, Math.max(0.02, it.t))
       })))
     }
-  })
+  }))
 }
 
 watch(() => props.sheet, (s) => {
@@ -443,13 +531,22 @@ const paletteChords = computed(() => {
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
 
+// 신규 업로드(temp) 보정 화면에서만: 코드 줄을 표시상 위로 올려
+// 원본 인쇄 코드와 겹치지 않게 함. 저장되는 y 좌표는 그대로(드래그 전까지).
+const NEW_UPLOAD_LINE_NUDGE = 0.022
+
 function lineStyle(line) {
   const h = Math.max(line.height || 0.028, 0.015)
-  const y = line.y ?? 0.1
+  let y = line.y ?? 0.1
+  // 기존 저장 곡 수정에는 적용하지 않음
+  if (isTemp()) {
+    y = Math.max(0.015, y - NEW_UPLOAD_LINE_NUDGE)
+  }
+  // 편집 중에는 항상 전체 폭 (저장 시에만 칩 구간으로 축소)
   return {
     top: `${(y - h / 2) * 100}%`,
-    left: `${(line.xStart || 0) * 100}%`,
-    width: `${((line.xEnd || 0.9) - (line.xStart || 0)) * 100}%`,
+    left: `${EDIT_X0 * 100}%`,
+    width: `${(EDIT_X1 - EDIT_X0) * 100}%`,
     height: `${h * 100}%`,
   }
 }
@@ -569,16 +666,7 @@ function startDrag(e, type, lineId, itemId = null) {
       const newBottom = Math.max(origTop + 0.012, Math.min(0.995, pos.y))
       line.height = Math.max(0.012, newBottom - origTop)
       line.y = (newBottom + origTop) / 2
-    } else if (t === 'line-left') {
-      const newStart = Math.min(line.xEnd - 0.08, pos.x)
-      restoreT(newStart, line.xEnd)
-      line.xStart = newStart
-    } else if (t === 'line-right') {
-      const newEnd = Math.max(line.xStart + 0.08, pos.x)
-      restoreT(line.xStart, newEnd)
-      line.xEnd = newEnd
-    }
-    else if (t === 'chord-x') {
+    } else if (t === 'chord-x') {
       const item = line.items.find((it) => it.id === drag.value.itemId)
       if (!item) return
       const span = line.xEnd - line.xStart
@@ -629,19 +717,19 @@ function onStageClick(e) {
       manual: true
     })
     activeLineId.value = target.id
-    message.value = `"${ch}" 코드줄에 삽입`
+    message.value = `"${ch}" 위치에 삽입`
     dirty.value = true
     return
   }
 
   const line = {
     id: 'L' + Date.now().toString(36),
-    y: pos.y, xStart: 0.08, xEnd: 0.92, height: 0.032,
+    y: pos.y, xStart: EDIT_X0, xEnd: EDIT_X1, height: 0.032,
     items: [{ id: 'n' + Date.now().toString(36), chord: ch, t: 0.5, manual: true }],
   }
   lines.value.push(line)
   activeLineId.value = line.id
-  message.value = `"${ch}" 새 코드줄에 삽입`
+  message.value = `"${ch}" 새 위치에 삽입`
   dirty.value = true
 }
 
@@ -649,13 +737,14 @@ function onLineClick(e, line) {
   e.stopPropagation()
   const L = lines.value.find((x) => x.id === line.id) || line
 
-  if (!placeChord.value && (e.shiftKey || multiSelectMode.value)) {
+  // Layout: 줄 선택/해제 토글만
+  if (bottomTab.value === 'adjust') {
     toggleLineSelection(L.id)
     return
   }
 
+  // 코드편집: 팔레트 선택 시 해당 위치에 삽입
   activeLineId.value = L.id
-  selectedLineIds.value = []
   if (!placeChord.value) return
   const pos = normFromEvent(e)
   if (!pos) return
@@ -663,7 +752,7 @@ function onLineClick(e, line) {
   const span = (L.xEnd - L.xStart) || 0.8
   const tNorm = Math.min(0.98, Math.max(0.02, (pos.x - L.xStart) / span))
   L.items.push({ id: 'n' + Date.now().toString(36), chord: placeChord.value, t: tNorm, manual: true })
-  message.value = `"${placeChord.value}" 코드줄에 삽입`
+  message.value = `"${placeChord.value}" 위치에 삽입`
   dirty.value = true
 }
 
@@ -676,6 +765,10 @@ const MANUAL_DBLCLICK_MS = 400
 
 function onChipClick(e, line, item) {
   e.stopPropagation()
+  if (bottomTab.value === 'adjust') {
+    toggleLineSelection(line.id)
+    return
+  }
   if (placeChord.value) {
     onLineClick(e, line)
     return
@@ -692,6 +785,7 @@ function onChipClick(e, line, item) {
 }
 
 function startEdit(lineId, item) {
+  if (bottomTab.value === 'adjust') return
   editKey.value = `${lineId}:${item.id}`
   const L = lines.value.find(x => x.id === lineId)
   const it = L?.items?.find(x => x.id === item.id)
@@ -737,14 +831,16 @@ function pickRoot(root) {
   message.value = `"${placeChord.value}" 선택 · 코드줄 탭해서 삽입`
 }
 function pickVariant(ch) {
+  bottomTab.value = 'place'
   placeChord.value = ch
-  message.value = `"${ch}" 선택 · 코드줄 탭해서 삽입`
+  message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
 }
 function pickCustom() {
   const ch = customChord.value.trim()
   if (!ch) return
+  bottomTab.value = 'place'
   placeChord.value = ch
-  message.value = `"${ch}" 선택 · 코드줄 탭해서 삽입`
+  message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
 }
 function clearPlace() { placeChord.value = ''; message.value = '' }
 
@@ -774,13 +870,17 @@ onMounted(() => {
   window.addEventListener('pointerup', onGlobalPointerUp)
   window.addEventListener('pointercancel', onGlobalPointerUp)
   window.addEventListener('beforeunload', handleBeforeUnload)
+  window.addEventListener('resize', measureStageWidth)
+  nextTick(() => measureStageWidth())
 })
+
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydownEsc)
   window.removeEventListener('pointermove', onGlobalPointerMove)
   window.removeEventListener('pointerup', onGlobalPointerUp)
   window.removeEventListener('pointercancel', onGlobalPointerUp)
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('resize', measureStageWidth)
 })
 // 앱 안의 "목록" 버튼도 마찬가지로 - 저장 안 된 변경사항이 있으면 한 번 확인
 function handleBackClick() {
@@ -794,7 +894,7 @@ function addEmptyLine() {
   const line = {
     id: 'L' + Date.now().toString(36),
     y: 0.2 + lines.value.length * 0.05,
-    xStart: 0.08, xEnd: 0.92, height: 0.032, items: [],
+    xStart: EDIT_X0, xEnd: EDIT_X1, height: 0.032, items: [],
   }
   lines.value.push(line)
   activeLineId.value = line.id
@@ -810,7 +910,7 @@ async function saveLines() {
   try {
     let res
     const payload = {
-      chords: lines.value,
+      chords: compactLinesForSave(lines.value),
       chord_font_size: chordFontPx.value
     }
     if (isTemp()) {
@@ -839,13 +939,14 @@ async function confirmSheet(mergeId = null) {
   const titleToSave = saveTitle.value.trim()
   try {
     await saveLines()
-    let song = { ...props.sheet, title: titleToSave, chords: lines.value, chord_font_size: chordFontPx.value }
+    const chordsToSave = compactLinesForSave(lines.value)
+    let song = { ...props.sheet, title: titleToSave, chords: chordsToSave, chord_font_size: chordFontPx.value }
 
     if (isTemp()) {
       const body = {
         temp_id: sheetId(),
         title: titleToSave,
-        chords: lines.value,
+        chords: chordsToSave,
         chord_font_size: chordFontPx.value,
         force_new: forceNewOnDuplicate.value,
       }
@@ -878,7 +979,7 @@ async function confirmSheet(mergeId = null) {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          chords: lines.value,
+          chords: chordsToSave,
           chord_font_size: chordFontPx.value,
           title: titleToSave,
         }),
@@ -953,7 +1054,7 @@ const statusBanner = computed(() => {
 </script>
 
 <template>
-  <div class="editor" :class="{ landscape: landscapeMode }">
+  <div class="editor" :class="{ landscape: landscapeMode, 'tools-collapsed': toolsCollapsed }">
     <!-- 상단 미니 툴바: 뒤로가기 / OCR / 저장 한 줄로 -->
     <div class="top-bar">
       <button class="icon-btn" title="목록" aria-label="목록" @click="handleBackClick">
@@ -1015,7 +1116,7 @@ const statusBanner = computed(() => {
           :style="stageStyle"
           @click="onStageClick"
         >
-          <img :src="imageUrl" class="score-img" draggable="false" @dragstart.prevent alt="악보" />
+          <img :src="imageUrl" class="score-img" draggable="false" @dragstart.prevent alt="악보" @load="measureStageWidth" />
           <div v-if="ocrLoading" class="ocr-scan-overlay">
             <div class="ocr-scan-info">
               <span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" />
@@ -1040,8 +1141,6 @@ const statusBanner = computed(() => {
             @click="onLineClick($event, line)"
             @pointerdown="onLineBodyDown($event, line)"
           >
-            <div class="handle left" @pointerdown="startDrag($event, 'line-left', line.id)" />
-            <div class="handle right" @pointerdown="startDrag($event, 'line-right', line.id)" />
             <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
             <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
             <div class="move-hint" title="드래그해서 코드줄 위아래로 이동">
@@ -1078,7 +1177,7 @@ const statusBanner = computed(() => {
             </div>
           </div>
           <div v-if="placeChord" class="place-banner" @click.stop>
-            「{{ placeChord }}」 선택됨 — 코드줄 탭해서 삽입 · Esc 취소
+            「{{ placeChord }}」 선택됨 — 표시할 위치를 탭 · Esc 취소
             <button type="button" @click="clearPlace">취소</button>
           </div>
         </div>
@@ -1086,11 +1185,18 @@ const statusBanner = computed(() => {
     </div>
     <div v-else class="canvas-empty">악보 이미지를 불러오는 중입니다…</div>
 
-    <!-- 하단 고정 도구: 배치 / 조정 탭 -->
+    <!-- 하단 고정 도구: 코드 / 줄 (가로 모드에서는 접기 가능) -->
     <div class="bottom-tools">
       <div class="bt-tabs">
-        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'">코드 배치</button>
-        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'">위치 조정</button>
+        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'; toolsCollapsed = false">Layout</button>
+        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'; toolsCollapsed = false">코드편집</button>
+        <button
+          v-if="landscapeMode"
+          type="button"
+          class="bt-collapse"
+          :title="toolsCollapsed ? '도구 펼치기' : '도구 접기'"
+          @click="toolsCollapsed = !toolsCollapsed"
+        >{{ toolsCollapsed ? '▲ 도구' : '▼ 접기' }}</button>
       </div>
 
       <div class="bt-panel" v-show="bottomTab === 'place'">
@@ -1106,70 +1212,41 @@ const statusBanner = computed(() => {
         </div>
       </div>
 
-      <div class="bt-panel" v-show="bottomTab === 'adjust'">
-        <div class="tool-line-block">
-          <div class="tlb-col">
-            <span class="tool-row-label">Line</span>
-            <div class="tlb-controls">
-              <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
-              <div class="tool-btns">
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP, 0)" title="왼쪽으로">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP, 0)" title="오른쪽으로">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-              </div>
-            </div>
+            <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
+        <div class="tool-row-compact">
+          <span class="trc-label">Line</span>
+          <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
+          <button type="button" class="trc-all" title="모든 줄 선택" @click="selectAllLines">
+            <span>전체</span>
+            <span>선택</span>
+          </button>
+          <div class="tool-btns">
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
           </div>
-          <div class="tlb-col align-right">
-            <span class="ml-label">Multi</span>
-            <div class="tlb-controls">
-              <button
-                type="button"
-                class="ml-switch"
-                :class="{ on: multiSelectMode }"
-                role="switch"
-                :aria-checked="multiSelectMode"
-                @click="toggleMultiSelectMode"
-              >
-                <span class="ml-knob" />
-              </button>
-              <button type="button" class="help-btn" title="도움말" @click="showLineHelp = !showLineHelp">?</button>
-            </div>
+          <span class="trc-sep" />
+          <span class="trc-label">Chord</span>
+          <div class="tool-btns">
+            <button type="button" @click="bumpFont(-1)" title="글자 작게">A-</button>
+            <button type="button" @click="bumpFont(1)" title="글자 크게">A+</button>
+          </div>
+          <div class="tool-btns">
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드 왼쪽">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드 오른쪽">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
           </div>
         </div>
-        <p v-if="showLineHelp" class="help-text">PC는 Shift+클릭으로도 여러 줄을 선택할 수 있어요</p>
-        <p v-if="selectedLineIds.length > 1" class="ms-count">
+        <p v-if="selectedLineIds.length >= 1" class="ms-count">
           {{ selectedLineIds.length }}개 선택됨
           <button type="button" class="ms-clear" @click="clearLineSelection">해제</button>
         </p>
-
-        <div class="tool-divider"></div>
-
-        <div class="tlb-col">
-          <span class="tool-row-label">Chord</span>
-          <div class="tlb-controls">
-            <div class="tool-btns">
-              <button type="button" @click="bumpFont(-1)">A-</button>
-              <button type="button" @click="bumpFont(1)">A+</button>
-            </div>
-            <div class="tool-btns">
-              <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드들만 왼쪽으로">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-              </button>
-              <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드들만 오른쪽으로">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-              </button>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -1241,16 +1318,110 @@ const statusBanner = computed(() => {
   margin: 0;
   transform-origin: top left;
   transform: rotate(90deg) translateY(-100%);
-  /* 90도 회전된 상태에서는 실제 세로 스와이프가 가로축 스크롤로 먹히는
-     경우가 있어(브라우저마다 다름), 한쪽만 허용하면 스크롤이 아예 안 먹는
-     문제가 있었다. 양쪽 다 열어서 어느 방향으로 스와이프해도 스크롤되게 한다. */
-  overflow: auto;
+  /* 가로 주작업: 캔버스 최대, 크롬 최소 */
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   touch-action: pan-x pan-y;
   background: var(--bg, #f4f6fa);
-  padding: 0.65rem 0.65rem calc(0.65rem + env(safe-area-inset-bottom));
+  padding: 0.4rem 0.45rem calc(0.35rem + env(safe-area-inset-bottom));
   box-sizing: border-box;
+}
+.editor.landscape .top-bar {
+  flex-shrink: 0;
+  gap: 0.35rem;
+}
+.editor.landscape .icon-btn {
+  width: 2.15rem;
+  height: 2.15rem;
+}
+.editor.landscape .ocr-pill,
+.editor.landscape .save-pill {
+  padding: 0.45rem 0.55rem;
+  font-size: 0.85rem;
+}
+.editor.landscape .status-banner {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.82rem;
+}
+.editor.landscape .canvas-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.editor.landscape .stage-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  height: 100%;
+  border-radius: 8px;
+}
+.editor.landscape .stage {
+  max-width: none;
+  width: 100%;
+}
+.editor.landscape .bottom-tools {
+  flex-shrink: 0;
+  position: static;
+  border-radius: 10px;
+  margin-top: 0;
+  max-height: 42%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.editor.landscape .bt-tabs button {
+  padding: 0.5rem 0.4rem;
+  font-size: 0.88rem;
+}
+.editor.landscape .bt-panel {
+  padding: 0.55rem 0.65rem calc(0.45rem + env(safe-area-inset-bottom));
+  max-height: none;
+  overflow-y: auto;
+  gap: 0.45rem;
+}
+.editor.landscape .root {
+  width: 2.35rem;
+  height: 2.35rem;
+  font-size: 0.95rem;
+}
+.editor.landscape .pchip {
+  padding: 0.5rem 0.7rem;
+  font-size: 0.92rem;
+  min-height: 2.2rem;
+}
+.editor.landscape .chip {
+  min-height: 1.55em;
+  padding: 0.12em 0.35em;
+}
+.editor.landscape .bt-collapse {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.65rem;
+  border: none;
+  background: #f1f5f9;
+  color: #334155;
+  font-weight: 700;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.editor.landscape.tools-collapsed .bt-panel {
+  display: none;
+}
+.editor.landscape.tools-collapsed .bottom-tools {
+  max-height: none;
+}
+.editor.landscape.tools-collapsed .bt-tabs button.on {
+  border-bottom-color: transparent;
+  background: #f8fafc;
+  color: #64748b;
 }
 
 /* --- 상단 미니 툴바 --- */
@@ -1455,7 +1626,15 @@ const statusBanner = computed(() => {
 .stage.mode-chord .handle { display: none; }
 .stage.mode-chord .chord-line { cursor: default; }
 /* 줄 모드: 칩 드래그 비활성 - 잡을 수 없다는 걸 커서로 표시 (더블탭 수정/삭제는 계속 가능) */
-.stage.mode-line .chip { cursor: default; }
+.stage.mode-line .items-layer,
+.stage.mode-line .chip {
+  /* Layout: 칩은 표시만 — 터치는 줄 선택으로 */
+  pointer-events: none !important;
+  cursor: default;
+}
+.stage.mode-chord .move-hint {
+  display: none;
+}
 .score-img {
   display: block;
   width: 100%;
@@ -1497,8 +1676,6 @@ const statusBanner = computed(() => {
 .chord-line.active .handle {
   opacity: 1;
 }
-.handle.left { left: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
-.handle.right { right: -9px; top: 0; bottom: 0; width: 18px; cursor: ew-resize; }
 .handle.top { top: 0; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .handle.bottom { bottom: 0; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .handle.top::after,
@@ -1514,19 +1691,6 @@ const statusBanner = computed(() => {
 }
 .handle.top::after { top: 0; }
 .handle.bottom::after { bottom: 0; }
-.handle.left::after,
-.handle.right::after {
-  content: '';
-  position: absolute;
-  top: 20%;
-  bottom: 20%;
-  width: 2px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #0d6efd;
-  border-radius: 2px;
-  opacity: 0.9;
-}
 .items-layer { position: absolute; inset: 0; pointer-events: none; }
 .move-hint {
   position: absolute;
@@ -1564,7 +1728,7 @@ const statusBanner = computed(() => {
   pointer-events: auto;
   cursor: grab;
   white-space: nowrap;
-  max-width: 5rem;
+  max-width: none;
 }
 .chip input { width: 2.6rem; font-size: inherit; font-weight: 700; border: 1px solid #333; border-radius: 2px; padding: 0 2px; }
 .chip .x {
@@ -1623,11 +1787,6 @@ const statusBanner = computed(() => {
    position:sticky는 transform이 걸린 조상 안에서는 containing block 계산이
    깨져서 아예 렌더링되지 않는(사라지는) 문제가 있다. 가로모드에서는 sticky를
    포기하고 그냥 일반 흐름 요소로 두어 스크롤해서 도달하도록 한다. */
-.editor.landscape .bottom-tools {
-  position: static;
-  border-radius: 12px;
-  margin-top: 0.4rem;
-}
 .bt-tabs {
   display: flex;
 }
@@ -1977,4 +2136,60 @@ const statusBanner = computed(() => {
 .modal-cancel:disabled,
 .modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
 
+
+.tool-row-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+}
+.trc-label {
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.trc-sep {
+  width: 1px;
+  height: 1.4rem;
+  background: #e2e8f0;
+  margin: 0 0.15rem;
+  flex-shrink: 0;
+}
+.bt-panel-adjust {
+  padding-top: 0.55rem !important;
+  padding-bottom: 0.55rem !important;
+}
+.editor.landscape .bt-panel-adjust {
+  padding: 0.4rem 0.55rem calc(0.35rem + env(safe-area-inset-bottom)) !important;
+}
+
+.trc-all {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 2.2rem;
+  height: 2.15rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.15;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.trc-all:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.trc-all span {
+  display: block;
+}
 </style>

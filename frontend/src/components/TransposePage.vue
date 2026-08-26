@@ -492,14 +492,6 @@ async function deleteSong() {
           </button>
           <div class="actions-spacer"></div>
           <button type="button" class="btn-edit" @click="emit('edit')">수정</button>
-          <button
-            type="button"
-            class="btn-fs"
-            :disabled="!previewUrl || rendering"
-            @click="openFullscreen"
-          >
-            전체 화면
-          </button>
           <button type="button" class="btn-dl" :disabled="!previewUrl || rendering" @click="downloadResult">
             다운로드
           </button>
@@ -795,22 +787,6 @@ h2 {
   cursor: pointer;
 }
 .btn-dl:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.btn-fs {
-  padding: 0.6rem 1rem;
-  background: #fff;
-  color: #1e293b;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.btn-fs:hover {
-  background: #f1f5f9;
-}
-.btn-fs:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
