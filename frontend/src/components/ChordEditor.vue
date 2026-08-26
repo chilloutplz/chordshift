@@ -188,6 +188,20 @@ function targetLines() {
   return lines.value.filter((L) => ids.includes(L.id))
 }
 
+const LINE_HEIGHT_STEP = 0.004
+const LINE_HEIGHT_MIN = 0.014
+const LINE_HEIGHT_MAX = 0.08
+
+function bumpLineHeight(delta) {
+  const targets = targetLines()
+  if (!targets.length) return
+  for (const L of targets) {
+    const h = L.height ?? 0.032
+    L.height = Math.min(LINE_HEIGHT_MAX, Math.max(LINE_HEIGHT_MIN, h + delta))
+  }
+  dirty.value = true
+}
+
 // 세로: 줄 이동. 가로: 전체 폭 모드라 칩만 이동
 function nudgeLine(dx, dy) {
   const targets = targetLines()
@@ -651,21 +665,9 @@ function startDrag(e, type, lineId, itemId = null) {
     }
 
     if (t === 'line-body') {
-      // 손가락 드래그는 세로 이동만 반영한다 - 가로는 터치로 정밀하게
-      // 맞추기 어려워서 오히려 오동작을 유발하므로, 가로 이동이 필요하면
-      // "위치 조정" 탭의 ← → 버튼(정밀 이동)을 쓰도록 분리했다.
+      // 세로 이동만 (높이 조절은 Layout 툴박스 버튼)
       const dy = pos.y - drag.value.startY
       line.y = Math.min(0.98, Math.max(0.02, drag.value.origY + dy))
-    } else if (t === 'line-h-top') {
-      const origBottom = drag.value.origY + drag.value.origHeight / 2
-      const newTop = Math.min(origBottom - 0.012, Math.max(0.005, pos.y))
-      line.height = Math.max(0.012, origBottom - newTop)
-      line.y = (newTop + origBottom) / 2
-    } else if (t === 'line-h-bottom') {
-      const origTop = drag.value.origY - drag.value.origHeight / 2
-      const newBottom = Math.max(origTop + 0.012, Math.min(0.995, pos.y))
-      line.height = Math.max(0.012, newBottom - origTop)
-      line.y = (newBottom + origTop) / 2
     } else if (t === 'chord-x') {
       const item = line.items.find((it) => it.id === drag.value.itemId)
       if (!item) return
@@ -1141,8 +1143,6 @@ const statusBanner = computed(() => {
             @click="onLineClick($event, line)"
             @pointerdown="onLineBodyDown($event, line)"
           >
-            <div class="handle top" @pointerdown="startDrag($event, 'line-h-top', line.id)" />
-            <div class="handle bottom" @pointerdown="startDrag($event, 'line-h-bottom', line.id)" />
             <div class="move-hint" title="드래그해서 코드줄 위아래로 이동">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="9 5 12 2 15 5" />
@@ -1227,6 +1227,10 @@ const statusBanner = computed(() => {
             <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
             </button>
+          </div>
+          <div class="tool-btns" title="줄 높이">
+            <button type="button" :disabled="!targetLineIds.length" @click="bumpLineHeight(-LINE_HEIGHT_STEP)" title="줄 얇게">H−</button>
+            <button type="button" :disabled="!targetLineIds.length" @click="bumpLineHeight(LINE_HEIGHT_STEP)" title="줄 두껍게">H+</button>
           </div>
           <span class="trc-sep" />
           <span class="trc-label">Chord</span>
