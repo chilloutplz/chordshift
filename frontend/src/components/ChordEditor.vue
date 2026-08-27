@@ -39,8 +39,8 @@ function preferMobileLandscape() {
   } catch (_) {}
   return false
 }
-/** 모바일 보정은 가로 모드를 주 작업으로 */
-const landscapeMode = ref(preferMobileLandscape())
+/** 기본은 세로 — 키보드 입력(코드 수정)을 위해 가로 자동 진입 안 함 */
+const landscapeMode = ref(false)
 /** 가로 모드에서 하단 툴 접기 → 캔버스 최대화 */
 const toolsCollapsed = ref(false)
 
@@ -48,6 +48,8 @@ const editKey = ref(null)
 const editValue = ref('')
 const activeLineId = ref(null)
 const placeChord = ref('')
+/** 팔레트 하이라이트 전용 (배치 모드와 분리 — 칩 선택 중 루트 탭 시 첫 변형 표시) */
+const previewChord = ref('')
 const customChord = ref('')
 const stageRef = ref(null)
 const stageFrameRef = ref(null)
@@ -58,7 +60,10 @@ const selectedRoot = ref(null)
 // --- 하단 도구 탭: 배치(코드 고르기) / 조정(이동·크기) ---
 const bottomTab = ref('adjust')
 watch(bottomTab, (tab) => {
-  if (tab !== 'place') clearPlace()
+  if (tab !== 'place') {
+    clearPlace()
+    clearChordSelection()
+  }
 })
 
 // --- 캔버스 확대/축소 (모바일에서 정밀 배치용) ---
@@ -149,8 +154,10 @@ watch(landscapeMode, (on) => {
 })
 watch(zoom, () => nextTick(() => measureStageWidth()))
 
-// --- Layout: 줄 다중 선택 (탭할 때마다 선택/해제 토글이 기본) ---
+// --- Layout: 줄 선택 ---
+// 기본 = 단일 선택(탭한 줄만). 「다중」ON 일 때만 토글로 여러 줄.
 const selectedLineIds = ref([])
+const lineMultiMode = ref(false)
 
 const targetLineIds = computed(() => selectedLineIds.value)
 
@@ -159,13 +166,33 @@ function isLineSelected(id) {
 }
 
 function toggleLineSelection(id) {
-  const idx = selectedLineIds.value.indexOf(id)
-  if (idx >= 0) {
-    selectedLineIds.value = selectedLineIds.value.filter((x) => x !== id)
-  } else {
-    selectedLineIds.value = [...selectedLineIds.value, id]
-  }
   activeLineId.value = id
+  if (lineMultiMode.value) {
+    const idx = selectedLineIds.value.indexOf(id)
+    if (idx >= 0) {
+      selectedLineIds.value = selectedLineIds.value.filter((x) => x !== id)
+    } else {
+      selectedLineIds.value = [...selectedLineIds.value, id]
+    }
+  } else {
+    // 단일: 같은 줄 다시 탭하면 해제, 다른 줄이면 그것만
+    if (selectedLineIds.value.length === 1 && selectedLineIds.value[0] === id) {
+      selectedLineIds.value = []
+    } else {
+      selectedLineIds.value = [id]
+    }
+  }
+}
+
+function toggleLineMultiMode() {
+  lineMultiMode.value = !lineMultiMode.value
+  // 다중 끄면 선택 1개만 유지
+  if (!lineMultiMode.value && selectedLineIds.value.length > 1) {
+    const keep = activeLineId.value && selectedLineIds.value.includes(activeLineId.value)
+      ? activeLineId.value
+      : selectedLineIds.value[0]
+    selectedLineIds.value = keep ? [keep] : []
+  }
 }
 
 function selectAllLines() {
@@ -177,6 +204,117 @@ function selectAllLines() {
 
 function clearLineSelection() {
   selectedLineIds.value = []
+}
+
+// --- 코드칩 다중 선택 (코드편집 탭) ---
+// key = `${lineId}:${itemId}`
+const selectedChordKeys = ref([])
+
+const selectedChordCount = computed(() => selectedChordKeys.value.length)
+const hasChordSelection = computed(() => selectedChordKeys.value.length > 0)
+const isSingleChordSelected = computed(() => selectedChordKeys.value.length === 1)
+const isMultiChordSelected = computed(() => selectedChordKeys.value.length > 1)
+
+function chordKey(lineId, itemId) {
+  return `${lineId}:${itemId}`
+}
+
+function isChordSelected(lineId, itemId) {
+  return selectedChordKeys.value.includes(chordKey(lineId, itemId))
+}
+
+function toggleChordSelection(lineId, itemId) {
+  const key = chordKey(lineId, itemId)
+  const idx = selectedChordKeys.value.indexOf(key)
+  if (idx >= 0) {
+    selectedChordKeys.value = selectedChordKeys.value.filter((k) => k !== key)
+  } else {
+    selectedChordKeys.value = [...selectedChordKeys.value, key]
+  }
+  // 선택 시 배치 모드 해제 + 코드편집 탭
+  placeChord.value = ''
+  bottomTab.value = 'place'
+  toolsCollapsed.value = false
+  activeLineId.value = lineId
+  // 단독 선택이면 직접입력란에 현재 코드 채움
+  if (selectedChordKeys.value.length === 1) {
+    const k = selectedChordKeys.value[0]
+    const [lid, iid] = k.split(':')
+    const L = lines.value.find((x) => x.id === lid)
+    const it = L?.items?.find((x) => x.id === iid)
+    if (it?.chord) customChord.value = it.chord
+  }
+  dirty.value = dirty.value // no-op keep reactive
+}
+
+function clearChordSelection() {
+  selectedChordKeys.value = []
+  customChord.value = ''
+  previewChord.value = ''
+}
+
+/** 코드편집 모드 완전 해제 (선택·배치·입력·팔레트) */
+function exitChordEditMode() {
+  placeChord.value = ''
+  previewChord.value = ''
+  customChord.value = ''
+  selectedRoot.value = null
+  selectedChordKeys.value = []
+  message.value = ''
+}
+
+function selectedChordItems() {
+  const out = []
+  for (const key of selectedChordKeys.value) {
+    const [lineId, itemId] = key.split(':')
+    const L = lines.value.find((x) => x.id === lineId)
+    const it = L?.items?.find((x) => x.id === itemId)
+    if (L && it) out.push({ line: L, item: it, key })
+  }
+  return out
+}
+
+/** 선택 코드에 이름 일괄 적용 (직접입력 → 선택/적용) */
+function applyChordNameToSelection(name) {
+  const ch = (name || '').trim()
+  if (!ch || !selectedChordKeys.value.length) return false
+  for (const { item } of selectedChordItems()) {
+    item.chord = ch
+  }
+  dirty.value = true
+  message.value = selectedChordKeys.value.length === 1
+    ? `"${ch}" 으로 수정`
+    : `${selectedChordKeys.value.length}개 코드를 "${ch}" 으로 수정`
+  return true
+}
+
+function deleteSelectedChords() {
+  if (!selectedChordKeys.value.length) return
+  const byLine = new Map()
+  for (const key of selectedChordKeys.value) {
+    const [lineId, itemId] = key.split(':')
+    if (!byLine.has(lineId)) byLine.set(lineId, new Set())
+    byLine.get(lineId).add(itemId)
+  }
+  for (const [lineId, ids] of byLine) {
+    const L = lines.value.find((x) => x.id === lineId)
+    if (!L) continue
+    L.items = (L.items || []).filter((it) => !ids.has(it.id))
+  }
+  // 빈 줄 제거
+  lines.value = lines.value.filter((L) => (L.items || []).length > 0)
+  selectedChordKeys.value = []
+  dirty.value = true
+  message.value = '선택한 코드를 삭제했습니다'
+}
+
+function nudgeSelectedChords(dt) {
+  if (!selectedChordKeys.value.length) return
+  for (const { line, item } of selectedChordItems()) {
+    const cur = typeof item.t === 'number' ? item.t : 0.5
+    item.t = Math.min(0.98, Math.max(0.02, cur + dt))
+  }
+  dirty.value = true
 }
 
 // --- 코드줄 이동 / 코드만 좌우 이동 툴 ---
@@ -396,6 +534,9 @@ const EDIT_X0 = 0.01
 const EDIT_X1 = 0.99
 const SAVE_LINE_PAD = 0.018
 const SAVE_MIN_SPAN = 0.06
+// 신규 업로드 보정: 표시를 위로 올려 원본 코드와 겹침 감소.
+// 저장 시 같은 값만큼 y 를 빼서 조옮김 렌더 위치 = 편집 화면 위치.
+const NEW_UPLOAD_LINE_NUDGE = 0.022
 
 function expandLinesToFullWidth(list) {
   const spanEdit = EDIT_X1 - EDIT_X0
@@ -437,9 +578,14 @@ function compactLinesForSave(list) {
       newEnd = Math.min(0.995, newStart + SAVE_MIN_SPAN)
     }
     const newSpan = Math.max(0.001, newEnd - newStart)
+    // temp 편집 화면은 y 를 NUDGE 만큼 올려 보여 주므로, 저장 좌표도 맞춤
+    let saveY = L.y ?? 0.1
+    if (isTemp()) {
+      saveY = Math.max(0.015, saveY - NEW_UPLOAD_LINE_NUDGE)
+    }
     out.push({
       id: L.id,
-      y: L.y,
+      y: Math.round(saveY * 1e5) / 1e5,
       height: L.height ?? 0.032,
       xStart: Math.round(newStart * 1e5) / 1e5,
       xEnd: Math.round(newEnd * 1e5) / 1e5,
@@ -545,10 +691,7 @@ const paletteChords = computed(() => {
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
 
-// 신규 업로드(temp) 보정 화면에서만: 코드 줄을 표시상 위로 올려
-// 원본 인쇄 코드와 겹치지 않게 함. 저장되는 y 좌표는 그대로(드래그 전까지).
-const NEW_UPLOAD_LINE_NUDGE = 0.022
-
+// 신규 업로드(temp): 표시만 위로 (저장 시 compactLinesForSave 에서 y 보정)
 function lineStyle(line) {
   const h = Math.max(line.height || 0.028, 0.015)
   let y = line.y ?? 0.1
@@ -597,8 +740,8 @@ function normFromEvent(e) {
   }
 
   // rotate(90deg) CW + origin top-left:
-  // 로컬 +x ≈ 화면 아래, 로컬 +y ≈ 화면 오른쪽 (AABB 기준)
-  // → 화면 Y 로 로컬 X, 화면 X 로 로컬 Y
+  // 로컬 +x ≈ 화면 아래, 로컬 +y ≈ 화면 왼쪽 방향 (Y 반전 필요)
+  // → 화면 Y 로 로컬 X, 화면 X 로 로컬 Y (1- 로 방향 맞춤)
   return {
     x: clampNorm((e.clientY - rect.top) / rect.height),
     y: clampNorm(1 - (e.clientX - rect.left) / rect.width),
@@ -615,6 +758,8 @@ function startDrag(e, type, lineId, itemId = null) {
   const isLineOp = type !== 'chord-x'
   if (isLineOp && bottomTab.value !== 'adjust') return
   if (!isLineOp && bottomTab.value !== 'place') return
+  // 칩 드래그(이동): 선택된 칩만
+  if (type === 'chord-x' && itemId && !isChordSelected(lineId, itemId)) return
   // 주의: 여기서 e.preventDefault()를 호출하면 안 된다 -
   // 터치 환경에서 pointerdown에 preventDefault를 걸면 브라우저가 그 터치에서
   // 파생되는 click/dblclick 합성 이벤트 자체를 만들지 않아서, 더블탭으로
@@ -711,9 +856,8 @@ function startDrag(e, type, lineId, itemId = null) {
 }
 
 function onLineBodyDown(e, line) {
-  if (placeChord.value) return
-  if (e.target !== e.currentTarget && !e.target.classList?.contains('items-layer')) return
-  startDrag(e, 'line-body', line.id)
+  // 줄 손 드래그 비활성 — 오동작 많음. 위치는 Layout 툴 ↑↓ 만 사용
+  return
 }
 
 function onStageClick(e) {
@@ -789,58 +933,26 @@ const MANUAL_DBLCLICK_MS = 400
 
 function onChipClick(e, line, item) {
   e.stopPropagation()
+  // Layout: 칩 무시 → 줄 선택
   if (bottomTab.value === 'adjust') {
     toggleLineSelection(line.id)
     return
   }
+  // 코드편집: 칩 탭 = 선택/해제 (인라인 수정·삭제 없음)
+  // 배치 모드 중이면 배치 취소 후 선택
   if (placeChord.value) {
-    onLineClick(e, line)
-    return
+    placeChord.value = ''
   }
-  const key = `${line.id}:${item.id}`
-  const now = Date.now()
-  if (lastChipClickKey === key && now - lastChipClickTime < MANUAL_DBLCLICK_MS) {
-    lastChipClickKey = null
-    if (editKey.value !== key) startEdit(line.id, item)
-    return
-  }
-  lastChipClickKey = key
-  lastChipClickTime = now
+  toggleChordSelection(line.id, item.id)
 }
 
-function startEdit(lineId, item) {
-  if (bottomTab.value === 'adjust') return
-  editKey.value = `${lineId}:${item.id}`
-  const L = lines.value.find(x => x.id === lineId)
-  const it = L?.items?.find(x => x.id === item.id)
-  editValue.value = it?.chord || item.chord || ''
-  requestAnimationFrame(() => {
-    setTimeout(() => {
-      const key = `${lineId}:${item.id}`
-      const input = document.querySelector(`.chip input[data-edit-key="${key}"]`)
-      if (input) {
-        input.focus()
-        const len = input.value.length
-        try { input.setSelectionRange(len, len) } catch(e) {}
-      }
-    }, 0)
-  })
-}
-
-function confirmEdit(lineId, item) {
-  if (editKey.value !== `${lineId}:${item.id}`) return
-  const L = lines.value.find(x => x.id === lineId)
-  const it = L?.items?.find(x => x.id === item.id)
-  if (it) {
-    it.chord = editValue.value.trim() || it.chord
-    dirty.value = true
-  }
-  editKey.value = null
-}
 function removeItem(line, itemId) {
   const L = lines.value.find(x => x.id === line.id)
   if (!L) return
   L.items = L.items.filter((it) => it.id !== itemId)
+  selectedChordKeys.value = selectedChordKeys.value.filter(
+    (k) => k !== chordKey(line.id, itemId)
+  )
   if (!L.items.length) {
     lines.value = lines.value.filter((x) => x.id !== L.id)
     selectedLineIds.value = selectedLineIds.value.filter((id) => id !== L.id)
@@ -851,11 +963,27 @@ function removeItem(line, itemId) {
 function pickRoot(root) {
   selectedRoot.value = root
   const list = VARIANTS[root] || [root]
-  placeChord.value = list[0] || root
-  message.value = `"${placeChord.value}" 선택 · 코드줄 탭해서 삽입`
+  const first = list[0] || root
+  // 대표(루트) 선택 시 항상 첫 번째 변형이 선택된 것으로 표시
+  previewChord.value = first
+  customChord.value = first
+  if (selectedChordKeys.value.length) {
+    message.value = `${selectedChordKeys.value.length}개 선택 중 · 「${first}」 또는 다른 변형을 고르면 적용`
+    return
+  }
+  placeChord.value = first
+  message.value = `"${first}" 선택 · 표시할 위치를 탭하세요`
 }
 function pickVariant(ch) {
   bottomTab.value = 'place'
+  previewChord.value = ch
+  customChord.value = ch
+  // 칩이 선택된 상태면 선택 코드 이름으로 적용
+  if (selectedChordKeys.value.length) {
+    applyChordNameToSelection(ch)
+    return
+  }
+  clearChordSelection()
   placeChord.value = ch
   message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
 }
@@ -863,18 +991,28 @@ function pickCustom() {
   const ch = customChord.value.trim()
   if (!ch) return
   bottomTab.value = 'place'
+  previewChord.value = ch
+  // 선택된 칩이 있으면 수정 적용, 없으면 배치용으로 선택
+  if (selectedChordKeys.value.length) {
+    applyChordNameToSelection(ch)
+    return
+  }
   placeChord.value = ch
   message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
 }
-function clearPlace() { placeChord.value = ''; message.value = '' }
+function clearPlace() {
+  placeChord.value = ''
+  previewChord.value = ''
+  message.value = ''
+}
 
 function onKeydownEsc(e) {
   if (e.key === 'Escape' || e.key === 'Esc') {
     if (placeChord.value) {
       clearPlace()
       e.preventDefault()
-    } else if (editKey.value) {
-      editKey.value = null
+    } else if (selectedChordKeys.value.length) {
+      clearChordSelection()
       e.preventDefault()
     }
   }
@@ -1163,38 +1301,18 @@ const statusBanner = computed(() => {
             :class="{ active: isLineSelected(line.id) }"
             :style="lineStyle(line)"
             @click="onLineClick($event, line)"
-            @pointerdown="onLineBodyDown($event, line)"
           >
-            <div class="move-hint" title="드래그해서 코드줄 위아래로 이동">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 5 12 2 15 5" />
-                <polyline points="15 19 12 22 9 19" />
-                <line x1="12" y1="2" x2="12" y2="22" />
-              </svg>
-            </div>
             <div class="items-layer">
               <div
                 v-for="item in line.items"
                 :key="item.id"
                 class="chip"
+                :class="{ selected: isChordSelected(line.id, item.id) }"
                 :style="{ left: chordLeftPct(line, item), fontSize: displayFontPx + 'px' }"
                 @pointerdown="startDrag($event, 'chord-x', line.id, item.id)"
                 @click="onChipClick($event, line, item)"
-                @dblclick.stop="startEdit(line.id, item)"
               >
-                <template v-if="editKey === line.id + ':' + item.id">
-                  <input :data-edit-key="line.id + ':' + item.id" v-model="editValue" @keyup.enter="confirmEdit(line.id, item)" @blur="confirmEdit(line.id, item)" @click.stop @pointerdown.stop @keydown.esc.stop="editKey = null" />
-                  <button
-                    class="x edit-x"
-                    title="삭제"
-                    @mousedown.prevent
-                    @pointerdown.stop.prevent
-                    @click.stop="removeItem(line, item.id)"
-                  >×</button>
-                </template>
-                <template v-else>
-                  <span>{{ item.chord }}</span>
-                </template>
+                <span>{{ item.chord }}</span>
               </div>
             </div>
           </div>
@@ -1222,22 +1340,72 @@ const statusBanner = computed(() => {
       </div>
 
       <div class="bt-panel" v-show="bottomTab === 'place'">
+        <!-- 선택된 칩: 수정·삭제·이동 -->
+        <div v-if="hasChordSelection" class="chord-sel-bar">
+          <span class="chord-sel-count">{{ selectedChordCount }}개 선택</span>
+          <button type="button" class="act danger" @click="deleteSelectedChords">삭제</button>
+          <div class="tool-btns">
+            <button type="button" @click="nudgeSelectedChords(-CHORD_NUDGE_STEP)" title="왼쪽">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button type="button" @click="nudgeSelectedChords(CHORD_NUDGE_STEP)" title="오른쪽">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+          <button type="button" class="act ghost" @click="clearChordSelection">해제</button>
+        </div>
+        <p v-if="hasChordSelection" class="chord-sel-hint">
+          <template v-if="isSingleChordSelected">이름 수정: 아래 입력 후 「적용」 · 또는 팔레트 선택</template>
+          <template v-else>일괄 이름 변경: 아래 입력 후 「적용」 · 또는 팔레트 선택</template>
+        </p>
         <div class="roots">
           <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
+          <button
+            v-if="selectedRoot || placeChord || previewChord || hasChordSelection"
+            type="button"
+            class="root root-cancel"
+            title="선택·배치 취소"
+            @click="exitChordEditMode"
+          >취소</button>
         </div>
         <div v-if="selectedRoot" class="variants">
-          <button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch }" @click="pickVariant(ch)">{{ ch }}</button>
+          <button
+            v-for="ch in paletteChords"
+            :key="ch"
+            type="button"
+            class="pchip"
+            :class="{ on: placeChord === ch || previewChord === ch }"
+            @click="pickVariant(ch)"
+          >{{ ch }}</button>
         </div>
         <div class="custom-row">
-          <input v-model="customChord" placeholder="직접 입력" @keyup.enter="pickCustom" />
-          <button type="button" class="act" @click="pickCustom">선택</button>
+          <input
+            v-model="customChord"
+            :placeholder="hasChordSelection ? '새 코드 이름' : '직접 입력'"
+            @keyup.enter="pickCustom"
+          />
+          <button type="button" class="act" @click="pickCustom">
+            {{ hasChordSelection ? '적용' : '선택' }}
+          </button>
         </div>
+        <p v-if="!hasChordSelection && !placeChord" class="chord-sel-hint muted">
+          칩을 탭하면 선택 · 팔레트/직접입력 후 위치를 탭하면 추가
+        </p>
       </div>
 
             <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
         <div class="tool-row-compact">
           <span class="trc-label">Line</span>
           <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
+          <button
+            type="button"
+            class="trc-all"
+            :class="{ on: lineMultiMode }"
+            title="다중 선택 모드"
+            @click="toggleLineMultiMode"
+          >
+            <span>다중</span>
+          </button>
           <button type="button" class="trc-all" title="모든 줄 선택" @click="selectAllLines">
             <span>전체</span>
             <span>선택</span>
@@ -1679,7 +1847,7 @@ const statusBanner = computed(() => {
   border-radius: 2px;
   z-index: 2;
   min-height: 18px;
-  cursor: grab;
+  cursor: pointer;
   touch-action: none;
 }
 .chord-line:hover {
@@ -2217,5 +2385,68 @@ const statusBanner = computed(() => {
 }
 .trc-all span {
   display: block;
+}
+
+.chip.selected {
+  background: rgba(13, 110, 253, 0.18);
+  outline: 2px solid #0d6efd;
+  outline-offset: 1px;
+  border-radius: 6px;
+  color: #0b5ed7;
+  z-index: 5;
+}
+.chord-sel-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+  padding: 0.35rem 0;
+}
+.chord-sel-count {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #0d6efd;
+}
+.chord-sel-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #475569;
+  line-height: 1.35;
+}
+.chord-sel-hint.muted {
+  color: #94a3b8;
+}
+.act.danger {
+  background: #dc2626;
+  color: #fff;
+}
+.act.danger:hover {
+  background: #b91c1c;
+}
+
+.chord-edit-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.15rem;
+}
+.exit-edit-btn {
+  font-size: 0.82rem;
+  padding: 0.4rem 0.75rem;
+}
+
+.trc-all.on {
+  background: #0d6efd;
+  border-color: #0d6efd;
+  color: #fff;
+}
+.root-cancel {
+  border-color: #94a3b8 !important;
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+  font-size: 0.75rem !important;
+  font-weight: 700 !important;
+}
+.root-cancel:hover {
+  background: #e2e8f0 !important;
 }
 </style>

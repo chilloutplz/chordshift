@@ -8,6 +8,7 @@ import { apiFetch } from './api/api.js'
 // vite-plugin-pwa가 제공하는 가상 모듈. 개발 모드(devOptions.enabled=false)에서는
 // 아무 동작 안 하는 더미로 대체되므로 import 자체는 항상 안전하다.
 import { registerSW } from 'virtual:pwa-register'
+import { version } from '../package.json'
 
 /**
  * 커피 한 잔 기부 링크
@@ -137,7 +138,7 @@ onUnmounted(() => {
       <button type="button" class="brand" @click="backHome" :title="page !== 'home' ? '홈으로' : ''">
         <img src="/icons/icon-96x96.png" alt="" class="logo" width="38" height="38" />
         <span class="brand-text">
-          <span class="name">ChordShift</span>
+          <span class="name">ChordShift v{{  version.split('.').slice(0,2).join('.') }}</span>
           <span class="tag">기타 악보 OCR · 조옮김</span>
         </span>
       </button>
