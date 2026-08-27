@@ -214,6 +214,11 @@ const selectedChordCount = computed(() => selectedChordKeys.value.length)
 const hasChordSelection = computed(() => selectedChordKeys.value.length > 0)
 const isSingleChordSelected = computed(() => selectedChordKeys.value.length === 1)
 const isMultiChordSelected = computed(() => selectedChordKeys.value.length > 1)
+/** 프리셋 선택 또는 직접입력으로 삽입 대기일 때만 해제 가능 */
+const canReleaseAdd = computed(() => {
+  if (selectedChordKeys.value.length) return false
+  return !!(placeChord.value || (customChord.value || '').trim())
+})
 
 function chordKey(lineId, itemId) {
   return `${lineId}:${itemId}`
@@ -231,36 +236,26 @@ function toggleChordSelection(lineId, itemId) {
   } else {
     selectedChordKeys.value = [...selectedChordKeys.value, key]
   }
-  // 선택 시 배치 모드 해제 + 코드편집 탭
+  // 칩 선택 시 삽입 대기만 해제 (같은 탭 안에서 선택↔삽입)
   placeChord.value = ''
   bottomTab.value = 'place'
   toolsCollapsed.value = false
   activeLineId.value = lineId
-  // 단독 선택이면 직접입력란에 현재 코드 채움
   if (selectedChordKeys.value.length === 1) {
     const k = selectedChordKeys.value[0]
     const [lid, iid] = k.split(':')
     const L = lines.value.find((x) => x.id === lid)
     const it = L?.items?.find((x) => x.id === iid)
     if (it?.chord) customChord.value = it.chord
+  } else if (!selectedChordKeys.value.length) {
+    customChord.value = ''
   }
-  dirty.value = dirty.value // no-op keep reactive
 }
 
 function clearChordSelection() {
   selectedChordKeys.value = []
   customChord.value = ''
   previewChord.value = ''
-}
-
-/** 코드편집 모드 완전 해제 (선택·배치·입력·팔레트) */
-function exitChordEditMode() {
-  placeChord.value = ''
-  previewChord.value = ''
-  customChord.value = ''
-  selectedRoot.value = null
-  selectedChordKeys.value = []
-  message.value = ''
 }
 
 function selectedChordItems() {
@@ -326,16 +321,48 @@ function targetLines() {
   return lines.value.filter((L) => ids.includes(L.id))
 }
 
-const LINE_HEIGHT_STEP = 0.004
+const LINE_EDGE_STEP = 0.004
 const LINE_HEIGHT_MIN = 0.014
 const LINE_HEIGHT_MAX = 0.08
 
-function bumpLineHeight(delta) {
+/** 줄 상단 경계 이동 (delta < 0 → 위로) */
+function bumpLineTop(delta) {
   const targets = targetLines()
   if (!targets.length) return
   for (const L of targets) {
     const h = L.height ?? 0.032
-    L.height = Math.min(LINE_HEIGHT_MAX, Math.max(LINE_HEIGHT_MIN, h + delta))
+    const y = L.y ?? 0.1
+    let top = y - h / 2
+    const bottom = y + h / 2
+    top = Math.min(bottom - LINE_HEIGHT_MIN, Math.max(0.005, top + delta))
+    let newH = bottom - top
+    if (newH > LINE_HEIGHT_MAX) {
+      top = bottom - LINE_HEIGHT_MAX
+      newH = LINE_HEIGHT_MAX
+    }
+    L.height = newH
+    L.y = (top + bottom) / 2
+  }
+  dirty.value = true
+}
+
+/** 줄 하단 경계 이동 (delta > 0 → 아래로) */
+function bumpLineBottom(delta) {
+  const targets = targetLines()
+  if (!targets.length) return
+  for (const L of targets) {
+    const h = L.height ?? 0.032
+    const y = L.y ?? 0.1
+    const top = y - h / 2
+    let bottom = y + h / 2
+    bottom = Math.max(top + LINE_HEIGHT_MIN, Math.min(0.995, bottom + delta))
+    let newH = bottom - top
+    if (newH > LINE_HEIGHT_MAX) {
+      bottom = top + LINE_HEIGHT_MAX
+      newH = LINE_HEIGHT_MAX
+    }
+    L.height = newH
+    L.y = (top + bottom) / 2
   }
   dirty.value = true
 }
@@ -496,12 +523,13 @@ async function runOcr() {
 
     const chords = data.chords || data.result?.chords || []
     if (chords && chords.length) {
-      lines.value = toLines(chords)
+      // OCR 좌표를 편집/저장/렌더 공통 좌표로 맞춤 (표시 전용 오프셋 사용 안 함)
+      lines.value = applyNewUploadYNudge(toLines(chords))
       message.value = isRerun
         ? `OCR 재실행 완료: ${chords.length}개 라인 인식`
         : `OCR 완료: ${chords.length}개 라인 인식`
       ocrHasRun.value = true
-      emit('updated', { ...props.sheet, chords })
+      emit('updated', { ...props.sheet, chords: lines.value })
     } else if (data.ocr_raw_text) {
       message.value = isRerun ? 'OCR 재실행 완료 (원문만 있음)' : 'OCR 완료 (원문만 있음)'
       ocrHasRun.value = true
@@ -534,9 +562,15 @@ const EDIT_X0 = 0.01
 const EDIT_X1 = 0.99
 const SAVE_LINE_PAD = 0.018
 const SAVE_MIN_SPAN = 0.06
-// 신규 업로드 보정: 표시를 위로 올려 원본 코드와 겹침 감소.
-// 저장 시 같은 값만큼 y 를 빼서 조옮김 렌더 위치 = 편집 화면 위치.
+// 신규 OCR 직후 한 번만 y에 적용(데이터 자체 보정). 표시/저장/렌더가 동일 좌표를 씀.
 const NEW_UPLOAD_LINE_NUDGE = 0.022
+
+function applyNewUploadYNudge(list) {
+  return (list || []).map((L) => ({
+    ...L,
+    y: Math.max(0.015, (typeof L.y === 'number' ? L.y : 0.1) - NEW_UPLOAD_LINE_NUDGE),
+  }))
+}
 
 function expandLinesToFullWidth(list) {
   const spanEdit = EDIT_X1 - EDIT_X0
@@ -578,14 +612,9 @@ function compactLinesForSave(list) {
       newEnd = Math.min(0.995, newStart + SAVE_MIN_SPAN)
     }
     const newSpan = Math.max(0.001, newEnd - newStart)
-    // temp 편집 화면은 y 를 NUDGE 만큼 올려 보여 주므로, 저장 좌표도 맞춤
-    let saveY = L.y ?? 0.1
-    if (isTemp()) {
-      saveY = Math.max(0.015, saveY - NEW_UPLOAD_LINE_NUDGE)
-    }
     out.push({
       id: L.id,
-      y: Math.round(saveY * 1e5) / 1e5,
+      y: Math.round((L.y ?? 0.1) * 1e5) / 1e5,
       height: L.height ?? 0.032,
       xStart: Math.round(newStart * 1e5) / 1e5,
       xEnd: Math.round(newEnd * 1e5) / 1e5,
@@ -691,15 +720,10 @@ const paletteChords = computed(() => {
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
 
-// 신규 업로드(temp): 표시만 위로 (저장 시 compactLinesForSave 에서 y 보정)
 function lineStyle(line) {
   const h = Math.max(line.height || 0.028, 0.015)
-  let y = line.y ?? 0.1
-  // 기존 저장 곡 수정에는 적용하지 않음
-  if (isTemp()) {
-    y = Math.max(0.015, y - NEW_UPLOAD_LINE_NUDGE)
-  }
-  // 편집 중에는 항상 전체 폭 (저장 시에만 칩 구간으로 축소)
+  const y = line.y ?? 0.1
+  // 편집·저장·조옮김 렌더 모두 동일 y (중앙 기준)
   return {
     top: `${(y - h / 2) * 100}%`,
     left: `${EDIT_X0 * 100}%`,
@@ -964,46 +988,67 @@ function pickRoot(root) {
   selectedRoot.value = root
   const list = VARIANTS[root] || [root]
   const first = list[0] || root
-  // 대표(루트) 선택 시 항상 첫 번째 변형이 선택된 것으로 표시
+  // 첫 변형 하이라이트. 칩 선택 중이면 배치 대기 시작 안 함
   previewChord.value = first
   customChord.value = first
   if (selectedChordKeys.value.length) {
-    message.value = `${selectedChordKeys.value.length}개 선택 중 · 「${first}」 또는 다른 변형을 고르면 적용`
+    message.value = ''
     return
   }
   placeChord.value = first
-  message.value = `"${first}" 선택 · 표시할 위치를 탭하세요`
+  message.value = `"${first}" · 위치를 탭하세요`
 }
 function pickVariant(ch) {
   bottomTab.value = 'place'
-  previewChord.value = ch
-  customChord.value = ch
   // 칩이 선택된 상태면 선택 코드 이름으로 적용
   if (selectedChordKeys.value.length) {
+    previewChord.value = ch
+    customChord.value = ch
     applyChordNameToSelection(ch)
+    return
+  }
+  // 같은 코드를 다시 탭하면 배치 대기 해제
+  if (placeChord.value === ch) {
+    clearPlace()
     return
   }
   clearChordSelection()
-  placeChord.value = ch
-  message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
-}
-function pickCustom() {
-  const ch = customChord.value.trim()
-  if (!ch) return
-  bottomTab.value = 'place'
   previewChord.value = ch
-  // 선택된 칩이 있으면 수정 적용, 없으면 배치용으로 선택
-  if (selectedChordKeys.value.length) {
-    applyChordNameToSelection(ch)
-    return
-  }
+  customChord.value = ch
   placeChord.value = ch
-  message.value = `"${ch}" 선택 · 표시할 위치를 탭하세요`
+  message.value = `"${ch}" · 위치를 탭하세요`
 }
+/** 직접입력: 칩 선택 중이면 이름 적용, 아니면 입력값 = 삽입 대기 */
+function onCustomChordInput() {
+  if (selectedChordKeys.value.length) return
+  const ch = customChord.value.trim()
+  if (ch) {
+    placeChord.value = ch
+    previewChord.value = ch
+  } else {
+    placeChord.value = ''
+    previewChord.value = ''
+  }
+}
+
+function applyFromInput() {
+  const ch = customChord.value.trim()
+  if (!ch || !selectedChordKeys.value.length) return
+  previewChord.value = ch
+  applyChordNameToSelection(ch)
+}
+
+/** 삽입 대기·입력·프리셋 하이라이트 해제 */
 function clearPlace() {
   placeChord.value = ''
   previewChord.value = ''
+  customChord.value = ''
+  selectedRoot.value = null
   message.value = ''
+}
+
+function releaseAddMode() {
+  clearPlace()
 }
 
 function onKeydownEsc(e) {
@@ -1316,10 +1361,6 @@ const statusBanner = computed(() => {
               </div>
             </div>
           </div>
-          <div v-if="placeChord" class="place-banner" @click.stop>
-            「{{ placeChord }}」 선택됨 — 표시할 위치를 탭 · Esc 취소
-            <button type="button" @click="clearPlace">취소</button>
-          </div>
         </div>
       </div>
     </div>
@@ -1352,21 +1393,9 @@ const statusBanner = computed(() => {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
             </button>
           </div>
-          <button type="button" class="act ghost" @click="clearChordSelection">해제</button>
         </div>
-        <p v-if="hasChordSelection" class="chord-sel-hint">
-          <template v-if="isSingleChordSelected">이름 수정: 아래 입력 후 「적용」 · 또는 팔레트 선택</template>
-          <template v-else>일괄 이름 변경: 아래 입력 후 「적용」 · 또는 팔레트 선택</template>
-        </p>
         <div class="roots">
           <button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button>
-          <button
-            v-if="selectedRoot || placeChord || previewChord || hasChordSelection"
-            type="button"
-            class="root root-cancel"
-            title="선택·배치 취소"
-            @click="exitChordEditMode"
-          >취소</button>
         </div>
         <div v-if="selectedRoot" class="variants">
           <button
@@ -1381,60 +1410,72 @@ const statusBanner = computed(() => {
         <div class="custom-row">
           <input
             v-model="customChord"
-            :placeholder="hasChordSelection ? '새 코드 이름' : '직접 입력'"
-            @keyup.enter="pickCustom"
+            :placeholder="hasChordSelection ? '이름 바꿔 적용' : (placeChord ? '위치를 탭하세요' : '코드 입력')"
+            @input="onCustomChordInput"
+            @keyup.enter="hasChordSelection ? applyFromInput() : null"
           />
-          <button type="button" class="act" @click="pickCustom">
-            {{ hasChordSelection ? '적용' : '선택' }}
-          </button>
+          <button
+            v-if="hasChordSelection"
+            type="button"
+            class="act"
+            :disabled="!customChord.trim()"
+            @click="applyFromInput"
+          >적용</button>
+          <button
+            v-else
+            type="button"
+            class="act ghost"
+            :disabled="!canReleaseAdd"
+            title="삽입 대기 해제"
+            @click="releaseAddMode"
+          >해제</button>
         </div>
-        <p v-if="!hasChordSelection && !placeChord" class="chord-sel-hint muted">
-          칩을 탭하면 선택 · 팔레트/직접입력 후 위치를 탭하면 추가
-        </p>
       </div>
 
-            <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
-        <div class="tool-row-compact">
-          <span class="trc-label">Line</span>
-          <button type="button" class="mini-btn" title="새 줄 추가" @click="addEmptyLine">+</button>
-          <button
-            type="button"
-            class="trc-all"
-            :class="{ on: lineMultiMode }"
-            title="다중 선택 모드"
-            @click="toggleLineMultiMode"
-          >
-            <span>다중</span>
-          </button>
-          <button type="button" class="trc-all" title="모든 줄 선택" @click="selectAllLines">
-            <span>전체</span>
-            <span>선택</span>
-          </button>
-          <div class="tool-btns">
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)" title="위로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)" title="아래로">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
+                        <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
+        <div class="layout-tools">
+          <div class="lt-row">
+            <span class="lt-label">LINE</span>
+            <button type="button" class="lt-btn" title="새 줄 추가" @click="addEmptyLine">Add</button>
+            <span class="lt-sep" />
+            <button
+              type="button"
+              class="lt-btn"
+              :class="{ on: lineMultiMode }"
+              title="다중 선택"
+              @click="toggleLineMultiMode"
+            >Mul.</button>
+            <button type="button" class="lt-btn" title="전체 선택" @click="selectAllLines">All</button>
+            <span class="lt-sep" />
+            <div class="lt-pair" title="줄 전체 이동">
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+            </div>
           </div>
-          <div class="tool-btns" title="줄 높이">
-            <button type="button" :disabled="!targetLineIds.length" @click="bumpLineHeight(-LINE_HEIGHT_STEP)" title="줄 얇게">H−</button>
-            <button type="button" :disabled="!targetLineIds.length" @click="bumpLineHeight(LINE_HEIGHT_STEP)" title="줄 두껍게">H+</button>
+          <div class="lt-row lt-row-edges">
+            <span class="lt-spacer" aria-hidden="true" />
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Top</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" title="상단 올리기" @click="bumpLineTop(-LINE_EDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" title="상단 내리기" @click="bumpLineTop(LINE_EDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+            </div>
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Bottom</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" title="하단 올리기" @click="bumpLineBottom(-LINE_EDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M12 5l-5 5M12 5l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" title="하단 내리기" @click="bumpLineBottom(LINE_EDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M12 19l-5-5M12 19l5-5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+            </div>
           </div>
-          <span class="trc-sep" />
-          <span class="trc-label">Chord</span>
-          <div class="tool-btns">
-            <button type="button" @click="bumpFont(-1)" title="글자 작게">A-</button>
-            <button type="button" @click="bumpFont(1)" title="글자 크게">A+</button>
-          </div>
-          <div class="tool-btns">
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)" title="코드 왼쪽">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            <button type="button" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)" title="코드 오른쪽">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
+          <div class="lt-row">
+            <span class="lt-label">CHORD</span>
+            <div class="lt-pair">
+              <button type="button" class="lt-btn" @click="bumpFont(-1)" title="글자 작게">A−</button>
+              <button type="button" class="lt-btn" @click="bumpFont(1)" title="글자 크게">A+</button>
+            </div>
+            <span class="lt-sep" />
+            <div class="lt-pair" title="코드 좌우 이동">
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M5 12l5-5M5 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M19 12l-5-5M19 12l5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+            </div>
           </div>
         </div>
         <p v-if="selectedLineIds.length >= 1" class="ms-count">
@@ -1442,6 +1483,7 @@ const statusBanner = computed(() => {
           <button type="button" class="ms-clear" @click="clearLineSelection">해제</button>
         </p>
       </div>
+
     </div>
 
     <div v-if="showSaveModal" class="modal-backdrop" @click.self="closeSaveModal">
@@ -1946,6 +1988,7 @@ const statusBanner = computed(() => {
   background: #fecaca;
 }
 .place-banner {
+  /* 배치 대기만 최소 안내 */
   position: absolute;
   left: 0; right: 0; bottom: 0;
   background: rgba(13, 110, 253, 0.92);
@@ -2448,5 +2491,112 @@ const statusBanner = computed(() => {
 }
 .root-cancel:hover {
   background: #e2e8f0 !important;
+}
+
+.layout-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+}
+.lt-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.4rem;
+  min-height: 2rem;
+}
+.lt-row-edges {
+  padding-left: 0;
+}
+.lt-label {
+  width: 3.2rem;
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+.lt-spacer {
+  width: 3.2rem;
+  flex-shrink: 0;
+}
+.lt-sep {
+  width: 1px;
+  height: 1.25rem;
+  background: #e2e8f0;
+  margin: 0 0.1rem;
+  flex-shrink: 0;
+}
+.lt-btn {
+  min-height: 2rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.lt-btn.on {
+  background: #0d6efd;
+  border-color: #0d6efd;
+  color: #fff;
+}
+.lt-btn:hover:not(.on) {
+  background: #f1f5f9;
+}
+.lt-icon {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.lt-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.lt-icon:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+.lt-pair {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.lt-edge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+.lt-edge-lab {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #64748b;
+  min-width: 2.6rem;
+}
+
+.act:disabled,
+.act.ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  background: #e2e8f0 !important;
+  color: #94a3b8 !important;
+  border-color: #e2e8f0 !important;
 }
 </style>
