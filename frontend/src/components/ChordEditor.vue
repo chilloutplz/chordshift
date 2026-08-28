@@ -30,6 +30,19 @@ const ocrQueueInfo = ref(null)
 const ocrHasRun = ref(!!(props.sheet.chords?.length || props.sheet.ocr_raw_text))
 // 저장 안 된 변경사항 추적용 dirty 플래그 - 뒤로가기/앱 종료 시 경고용
 const dirty = ref(false)
+
+/** 네이티브 confirm 대신 앱 모달 (제목을 ChordShift 로 표시) */
+const appConfirm = ref(null) // { message, resolve } | null
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    appConfirm.value = { message, resolve }
+  })
+}
+function answerConfirm(ok) {
+  const cur = appConfirm.value
+  appConfirm.value = null
+  if (cur) cur.resolve(!!ok)
+}
 // 앱 안에서 화면을 가로로 돌려보는 모드 (기기 자체 회전과 무관하게 CSS로 구현)
 function preferMobileLandscape() {
   if (typeof window === 'undefined') return false
@@ -473,7 +486,7 @@ async function runOcr() {
   }
   // 재실행이면 기존 수정 내용이 사라진다는 걸 명확히 확인받고 진행
   if (ocrHasRun.value) {
-    const ok = window.confirm('OCR을 다시 실행하면 지금까지 수정한 코드 내용이 모두 사라집니다.\n계속할까요?')
+    const ok = await askConfirm('OCR을 다시 실행하면 지금까지 수정한 코드 내용이 모두 사라집니다. 계속할까요?')
     if (!ok) return
   }
   const isRerun = ocrHasRun.value
@@ -523,12 +536,13 @@ async function runOcr() {
 
     const chords = data.chords || data.result?.chords || []
     if (chords && chords.length) {
-      // OCR 좌표를 편집/저장/렌더 공통 좌표로 맞춤 (표시 전용 오프셋 사용 안 함)
-      lines.value = applyNewUploadYNudge(toLines(chords))
+      lines.value = toLines(chords)
+      dirty.value = true
       message.value = isRerun
         ? `OCR 재실행 완료: ${chords.length}개 라인 인식`
         : `OCR 완료: ${chords.length}개 라인 인식`
       ocrHasRun.value = true
+      // 부모에 넘겨도 watch 가 dirty 중이면 로컬 lines 를 덮지 않음
       emit('updated', { ...props.sheet, chords: lines.value })
     } else if (data.ocr_raw_text) {
       message.value = isRerun ? 'OCR 재실행 완료 (원문만 있음)' : 'OCR 완료 (원문만 있음)'
@@ -562,15 +576,8 @@ const EDIT_X0 = 0.01
 const EDIT_X1 = 0.99
 const SAVE_LINE_PAD = 0.018
 const SAVE_MIN_SPAN = 0.06
-// 신규 OCR 직후 한 번만 y에 적용(데이터 자체 보정). 표시/저장/렌더가 동일 좌표를 씀.
-const NEW_UPLOAD_LINE_NUDGE = 0.022
-
-function applyNewUploadYNudge(list) {
-  return (list || []).map((L) => ({
-    ...L,
-    y: Math.max(0.015, (typeof L.y === 'number' ? L.y : 0.1) - NEW_UPLOAD_LINE_NUDGE),
-  }))
-}
+// y 는 OCR·편집·저장·렌더가 동일한 정규화 좌표(0~1, 줄 중앙)를 그대로 사용한다.
+// 표시 전용 오프셋/저장 시 재보정은 하지 않는다.
 
 function expandLinesToFullWidth(list) {
   const spanEdit = EDIT_X1 - EDIT_X0
@@ -703,7 +710,16 @@ function toLines(raw) {
   }))
 }
 
-watch(() => props.sheet, (s) => {
+watch(() => props.sheet, (s, prev) => {
+  const sid = s?.temp_id || s?.id
+  const pid = prev?.temp_id || prev?.id
+  // 같은 곡을 편집 중(dirty)이면 부모 갱신으로 로컬 좌표를 덮지 않음
+  // (저장 응답 chords 가 다르거나 타이밍 이슈로 y 가 틀어지는 것 방지)
+  if (dirty.value && prev && sid === pid) {
+    if (s.chord_font_size) chordFontPx.value = s.chord_font_size
+    else if (s.chordFontSize) chordFontPx.value = s.chordFontSize
+    return
+  }
   lines.value = toLines(s.chords)
   ocrHasRun.value = !!(s.chords?.length || s.ocr_raw_text)
   if (s.chord_font_size) {
@@ -711,7 +727,6 @@ watch(() => props.sheet, (s) => {
   } else if (s.chordFontSize) {
     chordFontPx.value = s.chordFontSize
   }
-  // 서버(부모)로부터 받은 최신 상태로 갱신된 시점이므로 "저장 안 된 변경"은 없다
   dirty.value = false
 }, { immediate: true })
 
@@ -1090,9 +1105,9 @@ onUnmounted(() => {
   window.removeEventListener('resize', measureStageWidth)
 })
 // 앱 안의 "목록" 버튼도 마찬가지로 - 저장 안 된 변경사항이 있으면 한 번 확인
-function handleBackClick() {
+async function handleBackClick() {
   if (dirty.value) {
-    const ok = window.confirm('저장하지 않은 변경사항이 있습니다. 그래도 나가시겠어요?')
+    const ok = await askConfirm('저장하지 않은 변경사항이 있습니다. 그래도 나가시겠어요?')
     if (!ok) return
   }
   emit('back')
@@ -1115,11 +1130,13 @@ function bumpFont(delta) {
 async function saveLines() {
   saving.value = true
   try {
-    let res
+    // 화면에 보이는 좌표 그대로 저장 (서버 응답 chords 로 y 를 바꾸지 않음)
+    const chordsToSave = compactLinesForSave(lines.value)
     const payload = {
-      chords: compactLinesForSave(lines.value),
+      chords: chordsToSave,
       chord_font_size: chordFontPx.value
     }
+    let res
     if (isTemp()) {
       res = await apiFetch(`/api/temp/${sheetId()}/chords/`, {
         method: 'PATCH',
@@ -1134,8 +1151,11 @@ async function saveLines() {
       })
     }
     if (!res.ok) throw new Error('저장 실패')
-    const data = await res.json()
-    emit('updated', { ...props.sheet, ...data, chords: data.chords ?? lines.value })
+    const data = await res.json().catch(() => ({}))
+    // 로컬에서 저장한 chords 를 기준으로 emit (편집 y = 조옮김 y)
+    lines.value = toLines(chordsToSave)
+    dirty.value = false
+    emit('updated', { ...props.sheet, ...data, chords: chordsToSave, chord_font_size: chordFontPx.value })
   } catch (e) { message.value = e.message }
   finally { saving.value = false }
 }
@@ -1145,8 +1165,9 @@ async function confirmSheet(mergeId = null) {
   message.value = ''
   const titleToSave = saveTitle.value.trim()
   try {
-    await saveLines()
+    // 저장 직전 스냅샷 — saveLines 이후에도 동일 좌표 보장
     const chordsToSave = compactLinesForSave(lines.value)
+    await saveLines()
     let song = { ...props.sheet, title: titleToSave, chords: chordsToSave, chord_font_size: chordFontPx.value }
 
     if (isTemp()) {
@@ -1178,8 +1199,11 @@ async function confirmSheet(mergeId = null) {
         ...data,
         is_temp: false,
         optimized_image: data.optimized_image || data.image_url || song.optimized_image,
-        chords: data.chords ?? lines.value,
+        // 조옮김 렌더는 이 chords 의 y 를 그대로 사용
+        chords: chordsToSave,
+        chord_font_size: chordFontPx.value,
       }
+      dirty.value = false
       emit('updated', song)
     } else {
       const res = await apiFetch(`/api/songs/${props.sheet.id}/`, {
@@ -1197,8 +1221,10 @@ async function confirmSheet(mergeId = null) {
         ...song,
         ...data,
         optimized_image: data.optimized_image || song.optimized_image,
-        chords: data.chords ?? lines.value,
+        chords: chordsToSave,
+        chord_font_size: chordFontPx.value,
       }
+      dirty.value = false
       emit('updated', song)
     }
 
@@ -1484,6 +1510,17 @@ const statusBanner = computed(() => {
         </p>
       </div>
 
+    </div>
+
+    <div v-if="appConfirm" class="modal-backdrop" @click.self="answerConfirm(false)">
+      <div class="modal-box app-confirm-box">
+        <h3>ChordShift</h3>
+        <p class="modal-hint app-confirm-msg">{{ appConfirm.message }}</p>
+        <div class="modal-actions">
+          <button type="button" class="modal-cancel" @click="answerConfirm(false)">취소</button>
+          <button type="button" class="modal-save" @click="answerConfirm(true)">확인</button>
+        </div>
+      </div>
     </div>
 
     <div v-if="showSaveModal" class="modal-backdrop" @click.self="closeSaveModal">
@@ -2598,5 +2635,16 @@ const statusBanner = computed(() => {
   background: #e2e8f0 !important;
   color: #94a3b8 !important;
   border-color: #e2e8f0 !important;
+}
+
+.app-confirm-box {
+  max-width: 20rem;
+}
+.app-confirm-msg {
+  white-space: pre-wrap;
+  margin: 0.5rem 0 1rem;
+  color: var(--text, #1a1d26);
+  font-size: 0.95rem;
+  line-height: 1.45;
 }
 </style>
