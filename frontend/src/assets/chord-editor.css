@@ -6,8 +6,6 @@
   max-width: 920px;
   margin: 0 auto;
 }
-/* 앱 안 가로 보기 모드 - 기기 자체 회전과 무관하게 화면 전체를 90도 돌려서
-   가로로 넓게 쓸 수 있게 한다. (네이티브 화면 회전에 의존하지 않는 방식) */
 .editor.landscape {
   position: fixed;
   inset: 0;
@@ -18,7 +16,6 @@
   margin: 0;
   transform-origin: top left;
   transform: rotate(90deg) translateY(-100%);
-  /* 가로 주작업: 캔버스 최대, 크롬 최소 */
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
@@ -124,7 +121,6 @@
   color: #64748b;
 }
 
-/* --- 상단 미니 툴바 --- */
 .top-bar {
   display: flex;
   align-items: center;
@@ -181,7 +177,6 @@
 }
 .save-pill:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* --- 상태 배너 --- */
 .status-banner {
   margin: 0;
   padding: 0.5rem 0.75rem;
@@ -207,7 +202,6 @@
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* --- 캔버스 --- */
 .canvas-wrap {
   position: relative;
 }
@@ -322,13 +316,10 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 .stage.placing { cursor: crosshair; outline: 3px solid #ff2d55; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(255,45,85,0.25); }
-/* 코드 모드: 줄 핸들/몸통 드래그 비활성 - 아예 안 보이게 해서 오터치 여지 자체를 없앤다 */
 .stage.mode-chord .handle { display: none; }
 .stage.mode-chord .chord-line { cursor: default; }
-/* 줄 모드: 칩 드래그 비활성 - 잡을 수 없다는 걸 커서로 표시 (더블탭 수정/삭제는 계속 가능) */
 .stage.mode-line .items-layer,
 .stage.mode-line .chip {
-  /* Layout: 칩은 표시만 — 터치는 줄 선택으로 */
   pointer-events: none !important;
   cursor: default;
 }
@@ -452,7 +443,6 @@
   background: #fecaca;
 }
 .place-banner {
-  /* 배치 대기만 최소 안내 */
   position: absolute;
   left: 0; right: 0; bottom: 0;
   background: rgba(13, 110, 253, 0.92);
@@ -473,7 +463,6 @@
   font-weight: 700;
 }
 
-/* --- 하단 고정 도구 --- */
 .bottom-tools {
   position: sticky;
   bottom: 0;
@@ -484,10 +473,6 @@
   box-shadow: 0 -4px 14px rgba(16, 24, 40, 0.08);
   overflow: hidden;
 }
-/* 가로모드에서는 .editor.landscape 자체에 transform(rotate)이 걸려있는데,
-   position:sticky는 transform이 걸린 조상 안에서는 containing block 계산이
-   깨져서 아예 렌더링되지 않는(사라지는) 문제가 있다. 가로모드에서는 sticky를
-   포기하고 그냥 일반 흐름 요소로 두어 스크롤해서 도달하도록 한다. */
 .bt-tabs {
   display: flex;
 }
@@ -527,86 +512,6 @@
 .act { padding: 0.55rem 0.85rem; border: none; border-radius: 8px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.88rem; font-weight: 600; }
 .act.ghost { background: #fff; color: #1a1a2e; border: 1px solid #ccc; }
 
-.tool-line-block {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: start;
-  gap: 0.4rem 0.75rem;
-}
-.tlb-col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  min-width: 0;
-}
-.tlb-col.align-right {
-  align-items: flex-end;
-}
-.tlb-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-.ml-label {
-  font-size: 0.9rem;
-  font-weight: 700;
-  color: #334155;
-}
-.ml-switch {
-  position: relative;
-  width: 38px;
-  height: 22px;
-  border-radius: 999px;
-  border: none;
-  background: #cbd5e1;
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.ml-switch.on {
-  background: #0d6efd;
-}
-.ml-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 0.15s;
-}
-.ml-switch.on .ml-knob {
-  transform: translateX(16px);
-}
-.help-btn {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid #cbd5e1;
-  background: #fff;
-  color: #64748b;
-  font-size: 0.75rem;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-}
-.help-btn:hover {
-  border-color: #93c5fd;
-  color: #0d6efd;
-}
-.help-text {
-  margin: 0;
-  font-size: 0.78rem;
-  color: #64748b;
-  background: #f8fafc;
-  border-radius: 6px;
-  padding: 0.4rem 0.55rem;
-}
 .ms-count {
   margin: 0;
   font-size: 0.82rem;
@@ -627,37 +532,6 @@
   font-weight: 700;
 }
 
-.tool-divider {
-  height: 1px;
-  background: #e2e6ef;
-  margin: 0.2rem 0;
-}
-
-.tool-row-label {
-  font-weight: 700;
-  font-size: 0.85rem;
-  color: #475569;
-}
-.mini-btn {
-  width: 2.5rem;
-  height: 2.5rem;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #fff;
-  cursor: pointer;
-  font-weight: 700;
-  font-size: 1.2rem;
-  color: #0f172a;
-  line-height: 1;
-}
-.mini-btn:hover {
-  background: #eff4ff;
-  border-color: #93c5fd;
-}
 .tool-btns {
   display: flex;
   gap: 0.4rem;
@@ -675,7 +549,6 @@
   font-weight: 700;
   color: #0f172a;
 }
-.tool-btns button svg { display: block; }
 .tool-btns button:hover:not(:disabled) {
   background: #eff4ff;
   border-color: #93c5fd;
@@ -685,7 +558,6 @@
   cursor: not-allowed;
 }
 
-/* --- OCR 스캔 오버레이 --- */
 .ocr-scan-overlay {
   position: absolute;
   inset: 0;
@@ -749,7 +621,6 @@
   100% { left: 0%;   transform: translate(0, -50%) rotate(-8deg); }
 }
 
-/* --- 저장 모달 --- */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -837,61 +708,12 @@
 .modal-cancel:disabled,
 .modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
 
-
-.tool-row-compact {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem 0.5rem;
-}
-.trc-label {
-  font-size: 0.75rem;
-  font-weight: 800;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  flex-shrink: 0;
-}
-.trc-sep {
-  width: 1px;
-  height: 1.4rem;
-  background: #e2e8f0;
-  margin: 0 0.15rem;
-  flex-shrink: 0;
-}
 .bt-panel-adjust {
   padding-top: 0.55rem !important;
   padding-bottom: 0.55rem !important;
 }
 .editor.landscape .bt-panel-adjust {
   padding: 0.4rem 0.55rem calc(0.35rem + env(safe-area-inset-bottom)) !important;
-}
-
-.trc-all {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  min-width: 2.2rem;
-  height: 2.15rem;
-  padding: 0.15rem 0.35rem;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #fff;
-  color: #334155;
-  font-size: 0.62rem;
-  font-weight: 700;
-  line-height: 1.15;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.trc-all:hover {
-  background: #f1f5f9;
-  border-color: #94a3b8;
-}
-.trc-all span {
-  display: block;
 }
 
 .chip.selected {
@@ -909,52 +731,12 @@
   gap: 0.4rem 0.5rem;
   padding: 0.35rem 0;
 }
-.chord-sel-count {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #0d6efd;
-}
-.chord-sel-hint {
-  margin: 0;
-  font-size: 0.78rem;
-  color: #475569;
-  line-height: 1.35;
-}
-.chord-sel-hint.muted {
-  color: #94a3b8;
-}
 .act.danger {
   background: #dc2626;
   color: #fff;
 }
 .act.danger:hover {
   background: #b91c1c;
-}
-
-.chord-edit-top {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 0.15rem;
-}
-.exit-edit-btn {
-  font-size: 0.82rem;
-  padding: 0.4rem 0.75rem;
-}
-
-.trc-all.on {
-  background: #0d6efd;
-  border-color: #0d6efd;
-  color: #fff;
-}
-.root-cancel {
-  border-color: #94a3b8 !important;
-  background: #f1f5f9 !important;
-  color: #475569 !important;
-  font-size: 0.75rem !important;
-  font-weight: 700 !important;
-}
-.root-cancel:hover {
-  background: #e2e8f0 !important;
 }
 
 .layout-tools {
@@ -965,7 +747,7 @@
 }
 .lt-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.35rem 0.4rem;
   min-height: 2rem;
@@ -984,6 +766,17 @@
 .lt-spacer {
   width: 3.2rem;
   flex-shrink: 0;
+}
+.lt-grow {
+  flex: 1 1 auto;
+  min-width: 0.75rem;
+}
+.lt-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem 0.4rem;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .lt-sep {
   width: 1px;
