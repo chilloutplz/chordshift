@@ -745,12 +745,25 @@
   gap: 0.4rem;
   padding: 0.15rem 0;
 }
+.lt-grid {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 2,3열(Top/Bottom, Left/Right) 넓이가 기준이 됨 */
+  width: fit-content;
+}
+
 .lt-row {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
   gap: 0.35rem 0.4rem;
   min-height: 2rem;
+}
+
+.lt-row.is-first {
+  justify-content: space-between; /* Add 왼쪽, Mul/All 오른쪽 */
+  width: 100%; /* 아래 2,3열 넓이에 맞춰 늘어남 */
 }
 .lt-row-edges {
   padding-left: 0;

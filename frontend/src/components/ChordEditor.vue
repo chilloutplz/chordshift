@@ -560,47 +560,41 @@ const statusBanner = computed(() => {
       </div>
       <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
         <div class="layout-tools">
-          <div class="lt-row">
-            <button type="button" class="lt-btn" @click="addEmptyLine">Add</button>
-            <span class="lt-grow" />
-            <div class="lt-right">
-              <button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button>
-              <button type="button" class="lt-btn" @click="selectAllLines">All</button>
-              <span class="lt-sep" />
-              <div class="lt-pair">
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
-              </div>
+          <div class="lt-grid">
+            <div class="lt-row is-first">
+                <button type="button" class="lt-btn" @click="addEmptyLine">Add</button>
+                <span class="lt-sep" />
+                <button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button>
+                <button type="button" class="lt-btn" @click="selectAllLines">All</button>
+                <span class="lt-sep" />
+                <div class="lt-pair">
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
+                </div>
             </div>
-          </div>
-          <div class="lt-row">
-            <span class="lt-grow" />
-            <div class="lt-right">
-              <div class="lt-edge">
-                <span class="lt-edge-lab">Top</span>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(-LINE_EDGE_STEP)">↑</button>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(LINE_EDGE_STEP)">↓</button>
-              </div>
-              <div class="lt-edge">
-                <span class="lt-edge-lab">Bottom</span>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(-LINE_EDGE_STEP)">↑</button>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(LINE_EDGE_STEP)">↓</button>
-              </div>
+            <div class="lt-row">
+                <div class="lt-edge">
+                  <span class="lt-edge-lab">Top</span>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(-LINE_EDGE_STEP)">↑</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(LINE_EDGE_STEP)">↓</button>
+                </div>
+                <div class="lt-edge">
+                  <span class="lt-edge-lab">Bottom</span>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(-LINE_EDGE_STEP)">↑</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(LINE_EDGE_STEP)">↓</button>
+                </div>
             </div>
-          </div>
-          <div class="lt-row">
-            <span class="lt-grow" />
-            <div class="lt-right">
-              <div class="lt-edge">
-                <span class="lt-edge-lab">Left</span>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(-LINE_EDGE_STEP)">←</button>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(LINE_EDGE_STEP)">→</button>
-              </div>
-              <div class="lt-edge">
-                <span class="lt-edge-lab">Right</span>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(-LINE_EDGE_STEP)">←</button>
-                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(LINE_EDGE_STEP)">→</button>
-              </div>
+            <div class="lt-row">
+                <div class="lt-edge">
+                  <span class="lt-edge-lab">Left</span>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(-LINE_EDGE_STEP)">←</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(LINE_EDGE_STEP)">→</button>
+                </div>
+                <div class="lt-edge">
+                  <span class="lt-edge-lab">Right</span>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(-LINE_EDGE_STEP)">←</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(LINE_EDGE_STEP)">→</button>
+                </div>
             </div>
           </div>
         </div>
