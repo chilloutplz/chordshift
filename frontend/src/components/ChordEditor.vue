@@ -1,4 +1,3 @@
-
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { API_BASE, apiFetch } from '@/api/api.js'
@@ -71,8 +70,9 @@ function clearPlace() {
 }
 function releaseAddMode() { clearPlace() }
 
-// --- chord selection (needed for clearChordSelection) ---
+// --- chord selection: 기본 = 단일, Mul. ON일 때만 다중 ---
 const selectedChordKeys = ref([])
+const chordMultiMode = ref(false)
 const selectedChordCount = computed(() => selectedChordKeys.value.length)
 const hasChordSelection = computed(() => selectedChordKeys.value.length > 0)
 const canReleaseAdd = computed(() => {
@@ -106,9 +106,18 @@ function applyChordNameToSelection(name) {
 }
 function toggleChordSelection(lineId, itemId) {
   const key = chordKey(lineId, itemId)
-  const idx = selectedChordKeys.value.indexOf(key)
-  if (idx >= 0) selectedChordKeys.value = selectedChordKeys.value.filter((k) => k !== key)
-  else selectedChordKeys.value = [...selectedChordKeys.value, key]
+  if (chordMultiMode.value) {
+    const idx = selectedChordKeys.value.indexOf(key)
+    if (idx >= 0) selectedChordKeys.value = selectedChordKeys.value.filter((k) => k !== key)
+    else selectedChordKeys.value = [...selectedChordKeys.value, key]
+  } else {
+    // 단일: 같은 칩 다시 탭하면 해제, 다른 칩이면 그것만
+    if (selectedChordKeys.value.length === 1 && selectedChordKeys.value[0] === key) {
+      selectedChordKeys.value = []
+    } else {
+      selectedChordKeys.value = [key]
+    }
+  }
   placeChord.value = ''
   bottomTab.value = 'place'
   toolsCollapsed.value = false
@@ -120,6 +129,14 @@ function toggleChordSelection(lineId, itemId) {
     const it = L?.items?.find((x) => x.id === iid)
     if (it?.chord) customChord.value = it.chord
   } else if (!selectedChordKeys.value.length) customChord.value = ''
+}
+function toggleChordMultiMode() {
+  chordMultiMode.value = !chordMultiMode.value
+  // 다중 끄면 선택 1개만 유지
+  if (!chordMultiMode.value && selectedChordKeys.value.length > 1) {
+    const keep = selectedChordKeys.value[0]
+    selectedChordKeys.value = keep ? [keep] : []
+  }
 }
 function deleteSelectedChords() {
   if (!selectedChordKeys.value.length) return
@@ -154,6 +171,7 @@ watch(bottomTab, (tab) => {
   if (tab !== 'place') {
     clearPlace()
     clearChordSelection()
+    chordMultiMode.value = false
   }
 })
 
@@ -492,13 +510,17 @@ const statusBanner = computed(() => {
         <button v-if="landscapeMode" type="button" class="bt-collapse" @click="toolsCollapsed = !toolsCollapsed">{{ toolsCollapsed ? '▲ 도구' : '▼ 접기' }}</button>
       </div>
       <div class="bt-panel" v-show="bottomTab === 'place'">
-        <div v-if="hasChordSelection" class="chord-sel-bar">
-          <span class="chord-sel-count">{{ selectedChordCount }}개 선택</span>
-          <button type="button" class="act danger" @click="deleteSelectedChords">삭제</button>
-          <div class="tool-btns">
-            <button type="button" @click="nudgeSelectedChords(-CHORD_NUDGE_STEP)">←</button>
-            <button type="button" @click="nudgeSelectedChords(CHORD_NUDGE_STEP)">→</button>
-          </div>
+        <div class="chord-sel-bar">
+          <button type="button" class="lt-btn" :class="{ on: chordMultiMode }" title="다중 선택" @click="toggleChordMultiMode">Mul.</button>
+          <template v-if="hasChordSelection">
+            <span class="chord-sel-count">{{ selectedChordCount }}개 선택</span>
+            <button type="button" class="act danger" @click="deleteSelectedChords">삭제</button>
+            <div class="tool-btns">
+              <button type="button" @click="nudgeSelectedChords(-CHORD_NUDGE_STEP)">←</button>
+              <button type="button" @click="nudgeSelectedChords(CHORD_NUDGE_STEP)">→</button>
+            </div>
+            <button type="button" class="ms-clear" @click="clearChordSelection">해제</button>
+          </template>
         </div>
         <div class="roots"><button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button></div>
         <div v-if="selectedRoot" class="variants"><button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch || previewChord === ch }" @click="pickVariant(ch)">{{ ch }}</button></div>
