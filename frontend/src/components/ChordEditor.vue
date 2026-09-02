@@ -29,7 +29,6 @@ function runOcr() {
   })
 }
 
-// --- confirm modal ---
 const appConfirm = ref(null)
 function askConfirm(msg) {
   return new Promise((resolve) => { appConfirm.value = { message: msg, resolve } })
@@ -181,8 +180,6 @@ function measureStageWidth() {
   if (w > 40) stageWidthPx.value = w
 }
 const displayFontPx = computed(() => {
-  // 악보(스테이지) 폭에 비례 — 좁으면 글자도 같이 줄어듦
-  // (이전: scale 최소 1 + mobileBoost 때문에 모바일에서만 코드가 상대적으로 커 보임)
   const base = chordFontPx.value * zoom.value
   const scale = Math.min(2.2, Math.max(0.5, stageWidthPx.value / DISPLAY_FONT_REF_W))
   const px = base * scale
@@ -227,6 +224,7 @@ const CHORD_NUDGE_STEP = 0.01
 const LINE_EDGE_STEP = 0.004
 const LINE_HEIGHT_MIN = 0.014
 const LINE_HEIGHT_MAX = 0.08
+const LINE_WIDTH_MIN = 0.06
 function targetLines() {
   const ids = targetLineIds.value
   return lines.value.filter((L) => ids.includes(L.id))
@@ -256,18 +254,49 @@ function bumpLineBottom(delta) {
   }
   dirty.value = true
 }
-function nudgeLine(dx, dy) {
+/** 왼쪽 가장자리 이동. delta<0 확장, delta>0 축소. 칩 절대 위치 유지 */
+function bumpLineLeft(delta) {
   const targets = targetLines(); if (!targets.length) return
-  if (dx) { const span = EDIT_X1 - EDIT_X0; nudgeChords(dx / span) }
-  if (dy) { for (const L of targets) L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy)); dirty.value = true }
-}
-function nudgeChords(dt) {
-  const targets = targetLines(); if (!targets.length) return
-  for (const L of targets) for (const it of L.items || []) {
-    const cur = typeof it.t === 'number' ? it.t : 0.5
-    it.t = Math.min(0.98, Math.max(0.02, cur + dt))
+  for (const L of targets) {
+    const x0 = L.xStart ?? EDIT_X0
+    const x1 = L.xEnd ?? EDIT_X1
+    const span = Math.max(0.001, x1 - x0)
+    const absList = (L.items || []).map((it) => {
+      const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+      return { it, abs: x0 + t * span }
+    })
+    let newStart = Math.max(0.005, Math.min(x1 - LINE_WIDTH_MIN, x0 + delta))
+    const newSpan = Math.max(0.001, x1 - newStart)
+    for (const { it, abs } of absList) {
+      it.t = Math.min(0.98, Math.max(0.02, (abs - newStart) / newSpan))
+    }
+    L.xStart = newStart
   }
   dirty.value = true
+}
+/** 오른쪽 가장자리 이동. delta<0 축소, delta>0 확장. 칩 절대 위치 유지 */
+function bumpLineRight(delta) {
+  const targets = targetLines(); if (!targets.length) return
+  for (const L of targets) {
+    const x0 = L.xStart ?? EDIT_X0
+    const x1 = L.xEnd ?? EDIT_X1
+    const span = Math.max(0.001, x1 - x0)
+    const absList = (L.items || []).map((it) => {
+      const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+      return { it, abs: x0 + t * span }
+    })
+    let newEnd = Math.min(0.995, Math.max(x0 + LINE_WIDTH_MIN, x1 + delta))
+    const newSpan = Math.max(0.001, newEnd - x0)
+    for (const { it, abs } of absList) {
+      it.t = Math.min(0.98, Math.max(0.02, (abs - x0) / newSpan))
+    }
+    L.xEnd = newEnd
+  }
+  dirty.value = true
+}
+function nudgeLine(dx, dy) {
+  const targets = targetLines(); if (!targets.length) return
+  if (dy) { for (const L of targets) L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy)); dirty.value = true }
 }
 
 const showSaveModal = ref(false)
@@ -318,8 +347,16 @@ const paletteChords = computed(() => {
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
 function lineStyle(line) {
-  const h = Math.max(line.height || 0.028, 0.015), y = line.y ?? 0.1
-  return { top: `${(y - h / 2) * 100}%`, left: `${EDIT_X0 * 100}%`, width: `${(EDIT_X1 - EDIT_X0) * 100}%`, height: `${h * 100}%` }
+  const h = Math.max(line.height || 0.028, 0.015)
+  const y = line.y ?? 0.1
+  const x0 = typeof line.xStart === 'number' ? line.xStart : EDIT_X0
+  const x1 = typeof line.xEnd === 'number' ? line.xEnd : EDIT_X1
+  return {
+    top: `${(y - h / 2) * 100}%`,
+    left: `${x0 * 100}%`,
+    width: `${Math.max(0.02, x1 - x0) * 100}%`,
+    height: `${h * 100}%`,
+  }
 }
 
 const { normFromEvent, startDrag, onStageClick, onLineClick, onChipClick } = useStageInteractions({
@@ -503,14 +540,17 @@ const statusBanner = computed(() => {
         <div class="chord-sel-bar">
           <button type="button" class="lt-btn" :class="{ on: chordMultiMode }" title="다중 선택" @click="toggleChordMultiMode">Mul.</button>
           <template v-if="hasChordSelection">
-            <span class="chord-sel-count">{{ selectedChordCount }}개 선택</span>
             <button type="button" class="act danger" @click="deleteSelectedChords">삭제</button>
             <div class="tool-btns">
               <button type="button" @click="nudgeSelectedChords(-CHORD_NUDGE_STEP)">←</button>
               <button type="button" @click="nudgeSelectedChords(CHORD_NUDGE_STEP)">→</button>
             </div>
-            <button type="button" class="ms-clear" @click="clearChordSelection">해제</button>
           </template>
+          <span class="lt-sep" />
+          <div class="lt-pair">
+            <button type="button" class="lt-btn" @click="bumpFont(-1)">A−</button>
+            <button type="button" class="lt-btn" @click="bumpFont(1)">A+</button>
+          </div>
         </div>
         <div class="roots"><button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button></div>
         <div v-if="selectedRoot" class="variants"><button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch || previewChord === ch }" @click="pickVariant(ch)">{{ ch }}</button></div>
@@ -519,12 +559,48 @@ const statusBanner = computed(() => {
           <button v-if="hasChordSelection" type="button" class="act" :disabled="!customChord.trim()" @click="applyFromInput">적용</button>
           <button v-else type="button" class="act ghost" :disabled="!canReleaseAdd" @click="releaseAddMode">해제</button>
         </div>
+        <p v-if="hasChordSelection" class="ms-count">{{ selectedChordCount }}개 선택됨 <button type="button" class="ms-clear" @click="clearChordSelection">해제</button></p>
       </div>
       <div class="bt-panel bt-panel-adjust" v-show="bottomTab === 'adjust'">
         <div class="layout-tools">
-          <div class="lt-row"><span class="lt-label">LINE</span><button type="button" class="lt-btn" @click="addEmptyLine">Add</button><span class="lt-sep" /><button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button><button type="button" class="lt-btn" @click="selectAllLines">All</button><span class="lt-sep" /><div class="lt-pair"><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button></div></div>
-          <div class="lt-row lt-row-edges"><span class="lt-spacer" /><div class="lt-edge"><span class="lt-edge-lab">Top</span><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(-LINE_EDGE_STEP)">↑</button><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(LINE_EDGE_STEP)">↓</button></div><div class="lt-edge"><span class="lt-edge-lab">Bottom</span><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(-LINE_EDGE_STEP)">↑</button><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(LINE_EDGE_STEP)">↓</button></div></div>
-          <div class="lt-row"><span class="lt-label">CHORD</span><div class="lt-pair"><button type="button" class="lt-btn" @click="bumpFont(-1)">A−</button><button type="button" class="lt-btn" @click="bumpFont(1)">A+</button></div><span class="lt-sep" /><div class="lt-pair"><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeChords(-CHORD_NUDGE_STEP)">←</button><button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeChords(CHORD_NUDGE_STEP)">→</button></div></div>
+          <div class="lt-row">
+            <span class="lt-label">LINE</span>
+            <button type="button" class="lt-btn" @click="addEmptyLine">Add</button>
+            <span class="lt-sep" />
+            <button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button>
+            <button type="button" class="lt-btn" @click="selectAllLines">All</button>
+            <span class="lt-sep" />
+            <div class="lt-pair">
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
+            </div>
+          </div>
+          <div class="lt-row lt-row-edges">
+            <span class="lt-spacer" />
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Top</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(-LINE_EDGE_STEP)">↑</button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineTop(LINE_EDGE_STEP)">↓</button>
+            </div>
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Bottom</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(-LINE_EDGE_STEP)">↑</button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineBottom(LINE_EDGE_STEP)">↓</button>
+            </div>
+          </div>
+          <div class="lt-row lt-row-edges">
+            <span class="lt-spacer" />
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Left</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(-LINE_EDGE_STEP)">←</button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineLeft(LINE_EDGE_STEP)">→</button>
+            </div>
+            <div class="lt-edge">
+              <span class="lt-edge-lab">Right</span>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(-LINE_EDGE_STEP)">←</button>
+              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="bumpLineRight(LINE_EDGE_STEP)">→</button>
+            </div>
+          </div>
         </div>
         <p v-if="selectedLineIds.length >= 1" class="ms-count">{{ selectedLineIds.length }}개 선택됨 <button type="button" class="ms-clear" @click="clearLineSelection">해제</button></p>
       </div>
