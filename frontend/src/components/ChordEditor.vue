@@ -254,7 +254,6 @@ function bumpLineBottom(delta) {
   }
   dirty.value = true
 }
-/** 왼쪽 가장자리 이동. delta<0 확장, delta>0 축소. 칩 절대 위치 유지 */
 function bumpLineLeft(delta) {
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
@@ -274,7 +273,6 @@ function bumpLineLeft(delta) {
   }
   dirty.value = true
 }
-/** 오른쪽 가장자리 이동. delta<0 축소, delta>0 확장. 칩 절대 위치 유지 */
 function bumpLineRight(delta) {
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
@@ -532,12 +530,16 @@ const statusBanner = computed(() => {
     <div v-else class="canvas-empty">악보 이미지를 불러오는 중입니다…</div>
     <div class="bottom-tools">
       <div class="bt-tabs">
-        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'; toolsCollapsed = false">Layout</button>
-        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'; toolsCollapsed = false">코드편집</button>
+        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'; toolsCollapsed = false">Line</button>
+        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'; toolsCollapsed = false">Chord</button>
         <button v-if="landscapeMode" type="button" class="bt-collapse" @click="toolsCollapsed = !toolsCollapsed">{{ toolsCollapsed ? '▲ 도구' : '▼ 접기' }}</button>
       </div>
       <div class="bt-panel" v-show="bottomTab === 'place'">
         <div class="chord-sel-bar">
+          <div class="lt-pair">
+            <button type="button" class="lt-btn" @click="bumpFont(-1)">A−</button>
+            <button type="button" class="lt-btn" @click="bumpFont(1)">A+</button>
+          </div>
           <button type="button" class="lt-btn" :class="{ on: chordMultiMode }" title="다중 선택" @click="toggleChordMultiMode">Mul.</button>
           <template v-if="hasChordSelection">
             <button type="button" class="act danger" @click="deleteSelectedChords">삭제</button>
@@ -546,11 +548,6 @@ const statusBanner = computed(() => {
               <button type="button" @click="nudgeSelectedChords(CHORD_NUDGE_STEP)">→</button>
             </div>
           </template>
-          <span class="lt-sep" />
-          <div class="lt-pair">
-            <button type="button" class="lt-btn" @click="bumpFont(-1)">A−</button>
-            <button type="button" class="lt-btn" @click="bumpFont(1)">A+</button>
-          </div>
         </div>
         <div class="roots"><button v-for="r in ROOTS" :key="r" type="button" class="root" :class="{ on: selectedRoot === r }" @click="pickRoot(r)">{{ r }}</button></div>
         <div v-if="selectedRoot" class="variants"><button v-for="ch in paletteChords" :key="ch" type="button" class="pchip" :class="{ on: placeChord === ch || previewChord === ch }" @click="pickVariant(ch)">{{ ch }}</button></div>
@@ -566,13 +563,15 @@ const statusBanner = computed(() => {
           <div class="lt-row">
             <span class="lt-label">LINE</span>
             <button type="button" class="lt-btn" @click="addEmptyLine">Add</button>
-            <span class="lt-sep" />
-            <button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button>
-            <button type="button" class="lt-btn" @click="selectAllLines">All</button>
-            <span class="lt-sep" />
-            <div class="lt-pair">
-              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
-              <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
+            <span class="lt-grow" />
+            <div class="lt-right">
+              <button type="button" class="lt-btn" :class="{ on: lineMultiMode }" @click="toggleLineMultiMode">Mul.</button>
+              <button type="button" class="lt-btn" @click="selectAllLines">All</button>
+              <span class="lt-sep" />
+              <div class="lt-pair">
+                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
+                <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
+              </div>
             </div>
           </div>
           <div class="lt-row lt-row-edges">
