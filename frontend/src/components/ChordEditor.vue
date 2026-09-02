@@ -60,7 +60,6 @@ const drag = ref(null)
 const chordFontPx = ref(13)
 const selectedRoot = ref(null)
 
-// --- clearPlace must be before watch(bottomTab) ---
 function clearPlace() {
   placeChord.value = ''
   previewChord.value = ''
@@ -70,7 +69,6 @@ function clearPlace() {
 }
 function releaseAddMode() { clearPlace() }
 
-// --- chord selection: 기본 = 단일, Mul. ON일 때만 다중 ---
 const selectedChordKeys = ref([])
 const chordMultiMode = ref(false)
 const selectedChordCount = computed(() => selectedChordKeys.value.length)
@@ -111,7 +109,6 @@ function toggleChordSelection(lineId, itemId) {
     if (idx >= 0) selectedChordKeys.value = selectedChordKeys.value.filter((k) => k !== key)
     else selectedChordKeys.value = [...selectedChordKeys.value, key]
   } else {
-    // 단일: 같은 칩 다시 탭하면 해제, 다른 칩이면 그것만
     if (selectedChordKeys.value.length === 1 && selectedChordKeys.value[0] === key) {
       selectedChordKeys.value = []
     } else {
@@ -132,7 +129,6 @@ function toggleChordSelection(lineId, itemId) {
 }
 function toggleChordMultiMode() {
   chordMultiMode.value = !chordMultiMode.value
-  // 다중 끄면 선택 1개만 유지
   if (!chordMultiMode.value && selectedChordKeys.value.length > 1) {
     const keep = selectedChordKeys.value[0]
     selectedChordKeys.value = keep ? [keep] : []
@@ -165,7 +161,6 @@ function nudgeSelectedChords(dt) {
   dirty.value = true
 }
 
-// --- bottom tab ---
 const bottomTab = ref('adjust')
 watch(bottomTab, (tab) => {
   if (tab !== 'place') {
@@ -175,10 +170,8 @@ watch(bottomTab, (tab) => {
   }
 })
 
-// --- zoom ---
 const { zoom, ZOOM_MIN, ZOOM_MAX, PAN_STEP, zoomIn, zoomOut, panBy, stageStyle, onStagePointerDownCapture } = useStageZoom(stageFrameRef, drag)
 
-// --- display font ---
 const stageWidthPx = ref(640)
 const DISPLAY_FONT_REF_W = 640
 function measureStageWidth() {
@@ -188,11 +181,12 @@ function measureStageWidth() {
   if (w > 40) stageWidthPx.value = w
 }
 const displayFontPx = computed(() => {
+  // 악보(스테이지) 폭에 비례 — 좁으면 글자도 같이 줄어듦
+  // (이전: scale 최소 1 + mobileBoost 때문에 모바일에서만 코드가 상대적으로 커 보임)
   const base = chordFontPx.value * zoom.value
-  const scale = Math.min(2.2, Math.max(1, stageWidthPx.value / DISPLAY_FONT_REF_W))
-  const mobileBoost = (landscapeMode.value || preferMobileLandscape()) ? 1.12 : 1
-  const px = base * scale * mobileBoost
-  return Math.round(Math.min(48, Math.max(10, px)))
+  const scale = Math.min(2.2, Math.max(0.5, stageWidthPx.value / DISPLAY_FONT_REF_W))
+  const px = base * scale
+  return Math.round(Math.min(48, Math.max(8, px)))
 })
 watch(landscapeMode, (on) => {
   if (!on) toolsCollapsed.value = false
@@ -200,7 +194,6 @@ watch(landscapeMode, (on) => {
 })
 watch(zoom, () => nextTick(() => measureStageWidth()))
 
-// --- line selection ---
 const selectedLineIds = ref([])
 const lineMultiMode = ref(false)
 const targetLineIds = computed(() => selectedLineIds.value)
@@ -229,7 +222,6 @@ function selectAllLines() {
 }
 function clearLineSelection() { selectedLineIds.value = [] }
 
-// --- line/chord nudge ---
 const LINE_NUDGE_STEP = 0.006
 const CHORD_NUDGE_STEP = 0.01
 const LINE_EDGE_STEP = 0.004
@@ -278,7 +270,6 @@ function nudgeChords(dt) {
   dirty.value = true
 }
 
-// --- save modal ---
 const showSaveModal = ref(false)
 const saveTitle = ref('')
 const saveTitleError = ref('')
@@ -308,7 +299,6 @@ function saveAsNewAnyway() { saveTitleError.value = ''; forceNewOnDuplicate.valu
 function isTemp() { return !!(props.sheet.is_temp || props.sheet.temp_id) }
 function sheetId() { return props.sheet.temp_id || props.sheet.id }
 
-// --- watch sheet ---
 watch(() => props.sheet, (s, prev) => {
   const sid = s?.temp_id || s?.id, pid = prev?.temp_id || prev?.id
   if (dirty.value && prev && sid === pid) {
