@@ -40,7 +40,7 @@ BASS_ONLY = re.compile(rf'^{_ROOT}$', re.IGNORECASE)
 LINE_Y_THRESHOLD = 0.025  
 
 # 최초 OCR 결과 표시 위치 보정
-OCR_CHORD_Y_OFFSET = 0.06
+OCR_CHORD_Y_OFFSET = 0.05
 
 # Google Vision 무료 티어 (월 단위, TEXT_DETECTION 1 unit = 1 image)
 OCR_MONTHLY_LIMIT = int(os.getenv('OCR_MONTHLY_LIMIT', '1000'))
@@ -134,9 +134,10 @@ def _flat_chord_hits(ocr_lines: list) -> list:
         # 2) 토큰 전체가 코드 (D, F#m, D/E, D／E …)
         normed = _normalize_chord_token(text)
         if _looks_like_chord(normed):
+            cx = round(x + (w or 0) / 2, 5)   # 왼쪽 끝(x) 대신 중심(x + w/2)
             hits.append({
                 'chord': normed,
-                'x': x,
+                'x': cx,
                 'y': y,
                 'confidence': conf,
                 'is_slash': False,
@@ -151,8 +152,10 @@ def _flat_chord_hits(ocr_lines: list) -> list:
             if not _looks_like_chord(token):
                 continue
             if norm:
-                ratio = m.start() / max(len(text), 1)
-                cx = round(norm['x'] + w * ratio, 5)
+                start_ratio = m.start() / max(len(text), 1)
+                end_ratio = m.end() / max(len(text), 1)
+                mid_ratio = (start_ratio + end_ratio) / 2   # 시작점 대신 매칭된 구간의 중간
+                cx = round(norm['x'] + w * mid_ratio, 5)
                 cy = y
             else:
                 cx, cy = 0.05, 0.1
