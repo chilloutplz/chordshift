@@ -36,7 +36,11 @@ SLASH_ONLY = re.compile(rf'^{_SLASH_CHARS}$')
 # 베이스로 쓸 수 있는 단순 루트 (A, F#, Bb)
 BASS_ONLY = re.compile(rf'^{_ROOT}$', re.IGNORECASE)
 
-LINE_Y_THRESHOLD = 0.025  # 같은 줄 판단 y 차이
+# 같은 줄 판단 y 차이
+LINE_Y_THRESHOLD = 0.025  
+
+# 최초 OCR 결과 표시 위치 보정
+OCR_CHORD_Y_OFFSET = 0.035
 
 # Google Vision 무료 티어 (월 단위, TEXT_DETECTION 1 unit = 1 image)
 OCR_MONTHLY_LIMIT = int(os.getenv('OCR_MONTHLY_LIMIT', '1000'))
@@ -247,22 +251,38 @@ def _merge_slash_hits(hits: list) -> list:
 def group_hits_into_lines(hits: list) -> list:
     if not hits:
         return []
-    sorted_hits = sorted(hits, key=lambda h: (h.get('y', 0), h.get('x', 0)))
+
+    sorted_hits = sorted(
+        hits,
+        key=lambda h: (h.get('y', 0), h.get('x', 0))
+    )
+
     clusters = []
+
     for h in sorted_hits:
         placed = False
+
         for cl in clusters:
             avg_y = sum(c['y'] for c in cl) / len(cl)
+
             if abs(h['y'] - avg_y) <= LINE_Y_THRESHOLD:
                 cl.append(h)
                 placed = True
                 break
+
         if not placed:
             clusters.append([h])
+
     lines_out = []
+
     for cl in clusters:
         cl.sort(key=lambda c: c.get('x', 0))
+
         y = sum(c['y'] for c in cl) / len(cl)
+
+        # 최초 OCR 결과에서만 코드줄을 위쪽으로 표시
+        display_y = max(0.02, y - OCR_CHORD_Y_OFFSET)
+
         items = [
             {
                 'id': uuid.uuid4().hex[:8],
@@ -272,15 +292,18 @@ def group_hits_into_lines(hits: list) -> list:
             }
             for c in cl
         ]
+
         lines_out.append({
             'id': 'L' + uuid.uuid4().hex[:6],
-            'y': round(min(0.98, max(0.02, y)), 5),
+            'y': round(display_y, 5),
             'xStart': 0.01,
             'xEnd': 0.99,
             'height': 0.028,
             'items': items,
         })
+
     lines_out.sort(key=lambda L: L['y'])
+
     return lines_out
 
 
