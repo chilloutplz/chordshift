@@ -444,7 +444,7 @@ async function confirmSheet(mergeId = null) {
       const data = await res.json().catch(() => ({}))
       if (res.status === 409 && data.error === 'duplicate_title') { dupCandidates.value = data.candidates || []; saveTitleError.value = data.message || `"${titleToSave}" 제목의 곡이 이미 있습니다.`; showSaveModal.value = true; return }
       if (!res.ok) throw new Error(data.error || data.message || '보정본 저장 실패.')
-      song = { ...song, ...data, is_temp: false, optimized_image: data.optimized_image || data.image_url || song.optimized_image, chords: chordsToSave, chord_font_size: chordFontPx.value }
+      song = { ...song, ...data, is_temp: false, temp_id: undefined, optimized_image: data.optimized_image || data.image_url || song.optimized_image, chords: chordsToSave, chord_font_size: chordFontPx.value }
       dirty.value = false; emit('updated', song)
     } else {
       const res = await apiFetch(`/api/songs/${props.sheet.id}/`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chords: chordsToSave, chord_font_size: chordFontPx.value, title: titleToSave }) })
