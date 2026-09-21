@@ -151,7 +151,7 @@ function toLines(raw) {
     g.sort((a, b) => a.x - b.x)
     return {
       id: `L${gi}`,
-      y: 0.12 + 0.06 * gi,
+      y: 0.06 + 0.06 * gi,
       xStart: EDIT_X0,
       xEnd: EDIT_X1,
       height: 0.032,
