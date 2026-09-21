@@ -40,7 +40,7 @@ BASS_ONLY = re.compile(rf'^{_ROOT}$', re.IGNORECASE)
 LINE_Y_THRESHOLD = 0.025  
 
 # 최초 OCR 결과 표시 위치 보정
-OCR_CHORD_Y_OFFSET = 0.035
+OCR_CHORD_Y_OFFSET = 0.06
 
 # Google Vision 무료 티어 (월 단위, TEXT_DETECTION 1 unit = 1 image)
 OCR_MONTHLY_LIMIT = int(os.getenv('OCR_MONTHLY_LIMIT', '1000'))
@@ -303,7 +303,7 @@ def group_hits_into_lines(hits: list) -> list:
         })
 
     lines_out.sort(key=lambda L: L['y'])
-
+    
     return lines_out
 
 
