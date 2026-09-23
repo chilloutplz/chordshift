@@ -383,6 +383,11 @@
 .handle.top::after { top: 0; }
 .handle.bottom::after { bottom: 0; }
 .items-layer { position: absolute; inset: 0; pointer-events: none; }
+/* 코드 칩 전용 레이어: .chord-line 박스의 크기(min-height 포함)와 무관하게
+   이미지 전체 기준 절대 좌표로 칩을 배치한다. .stage.mode-line .chip 규칙은
+   .chip이 .stage의 후손이기만 하면 그대로 적용되므로 별도 수정 불필요. */
+.chips-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.chips-layer .chip { pointer-events: auto; }
 .move-hint {
   position: absolute;
   top: 50%;

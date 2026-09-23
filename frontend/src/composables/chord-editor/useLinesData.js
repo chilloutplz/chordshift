@@ -17,6 +17,8 @@ function ensureItemT(items) {
 /**
  * 저장: 빈 코드만 제거하고 좌표는 그대로 둔다.
  * xStart/xEnd/t/y 를 다시 계산하지 않는다.
+ * topOffset/bottomOffset 이 있으면 함께 저장해 다음에 불러올 때도
+ * top/bottom 경계가 중심(y)과 독립적으로 복원되도록 한다.
  */
 function compactLinesForSave(list) {
   const out = []
@@ -36,6 +38,12 @@ function compactLinesForSave(list) {
       id: L.id,
       y: Math.round((L.y ?? 0.1) * 1e5) / 1e5,
       height: L.height ?? 0.032,
+      ...(typeof L.topOffset === 'number'
+        ? { topOffset: Math.round(L.topOffset * 1e5) / 1e5 }
+        : {}),
+      ...(typeof L.bottomOffset === 'number'
+        ? { bottomOffset: Math.round(L.bottomOffset * 1e5) / 1e5 }
+        : {}),
       xStart: typeof L.xStart === 'number' ? L.xStart : EDIT_X0,
       xEnd: typeof L.xEnd === 'number' ? L.xEnd : EDIT_X1,
       items,
@@ -83,6 +91,9 @@ function legacyToAbsoluteIfNeeded(list) {
  * toLines
  * - OCR: t = x/W (읽은 가로 위치 그대로), 세로만 상단 배치
  * - 저장본: 좌표 그대로 (필요 시 예전 상대 t만 절대 t로 복원)
+ * - topOffset/bottomOffset: 저장돼 있으면 그대로 전달 (legacyToAbsoluteIfNeeded는
+ *   스프레드로 통과시키므로 별도 처리 불필요). 없으면 undefined로 두고,
+ *   ChordEditor 쪽에서 height/2 기본값으로 대칭 처리한다.
  */
 function toLines(raw) {
   if (!Array.isArray(raw) || !raw.length) return []
@@ -96,6 +107,8 @@ function toLines(raw) {
         xStart: typeof L.xStart === 'number' ? L.xStart : EDIT_X0,
         xEnd: typeof L.xEnd === 'number' ? L.xEnd : EDIT_X1,
         height: L.height ?? 0.032,
+        topOffset: typeof L.topOffset === 'number' ? L.topOffset : undefined,
+        bottomOffset: typeof L.bottomOffset === 'number' ? L.bottomOffset : undefined,
         items: (L.items || []).map((it, j) => ({
           id: it.id || `i${i}_${j}`,
           chord: it.chord || it.text || '',

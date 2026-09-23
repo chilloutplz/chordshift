@@ -172,12 +172,14 @@ watch(bottomTab, (tab) => {
 const { zoom, ZOOM_MIN, ZOOM_MAX, PAN_STEP, zoomIn, zoomOut, panBy, stageStyle, onStagePointerDownCapture } = useStageZoom(stageFrameRef, drag)
 
 const stageWidthPx = ref(640)
+const stageHeightPx = ref(480)
 const DISPLAY_FONT_REF_W = 640
 function measureStageWidth() {
   const el = stageRef.value
   if (!el) return
-  const w = el.getBoundingClientRect().width
-  if (w > 40) stageWidthPx.value = w
+  const rect = el.getBoundingClientRect()
+  if (rect.width > 40) stageWidthPx.value = rect.width
+  if (rect.height > 40) stageHeightPx.value = rect.height
 }
 const displayFontPx = computed(() => {
   const base = chordFontPx.value * zoom.value
@@ -185,6 +187,29 @@ const displayFontPx = computed(() => {
   const px = base * scale
   return Math.round(Math.min(48, Math.max(8, px)))
 })
+// 칩(코드 텍스트)의 세로 절반 높이를 스테이지 실제 렌더 높이 대비 비율로 환산.
+// line-height(~1.2) + 위아래 패딩(0.25rem*2 ≈ 8px)을 대략 반영해 여유를 조금 더 둔다.
+// Top/Bottom 최소 오프셋이 이 값보다 작아지면, 박스 테두리가 칩 글자 한가운데를
+// 지나가 보일 수 있으므로 이 값을 하한선으로 사용한다.
+const minChipGapNorm = computed(() => {
+  const chipHalfPx = displayFontPx.value * 1.2 * 0.5 + 4
+  if (!(stageHeightPx.value > 0)) return LINE_OFFSET_MIN
+  return Math.max(LINE_OFFSET_MIN, chipHalfPx / stageHeightPx.value)
+})
+// 코드칩의 가로 절반 너비를 스테이지 실제 렌더 폭 대비 비율로 환산.
+// 글자 수가 다 다르므로(F vs Csus4) 문자당 평균 폭을 폰트 크기의 약 0.62배로
+// 근사하고, 칩 좌우 패딩(0.4rem+0.2rem 대략) 만큼 여유를 더한다.
+// Left/Right 최소/최대값이 이 값보다 좁아지면 박스 테두리가 그 칩의 실제
+// 글자 영역과 겹쳐 보일 수 있으므로, bumpLineLeft/Right에서 이 값을 이용해
+// 가장 가장자리에 있는 칩을 넘어가지 못하도록 막는다.
+function chipHalfWidthNorm(chordText) {
+  const len = Math.max(1, String(chordText || '').length)
+  const charW = displayFontPx.value * 0.62
+  const pad = 10
+  const widthPx = len * charW + pad
+  const stageW = stageWidthPx.value > 0 ? stageWidthPx.value : 640
+  return (widthPx / 2) / stageW
+}
 watch(landscapeMode, (on) => {
   if (!on) toolsCollapsed.value = false
   nextTick(() => measureStageWidth())
@@ -225,32 +250,44 @@ const LINE_EDGE_STEP = 0.004
 const LINE_HEIGHT_MIN = 0.014
 const LINE_HEIGHT_MAX = 0.08
 const LINE_WIDTH_MIN = 0.06
+// top/bottom 경계를 독립적으로 움직이기 위한 오프셋(각각 y로부터의 거리) 한계.
+// 기존 LINE_HEIGHT_MIN/MAX는 "대칭 높이" 기준이라 그대로 재사용하지 않고,
+// 편도(한쪽) 오프셋 기준으로 별도 한계를 둔다.
+const LINE_OFFSET_MIN = 0.005
+const LINE_OFFSET_MAX = 0.08
 function targetLines() {
   const ids = targetLineIds.value
   return lines.value.filter((L) => ids.includes(L.id))
 }
+// Top/Bottom 버튼: 중심(y)은 절대 이동하지 않고, 그쪽 경계(offset)만 조절한다.
+// 코드 칩은 y(절대 앵커)만 참조하므로 이 함수들이 칩 위치에 영향을 주지 않는다.
 function bumpLineTop(delta) {
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
-    const h = L.height ?? 0.032, y = L.y ?? 0.1
-    let top = y - h / 2, bottom = y + h / 2
-    top = Math.min(bottom - LINE_HEIGHT_MIN, Math.max(0.005, top + delta))
-    let newH = bottom - top
-    if (newH > LINE_HEIGHT_MAX) { top = bottom - LINE_HEIGHT_MAX; newH = LINE_HEIGHT_MAX }
-    L.height = newH; L.y = (top + bottom) / 2
+    const h = L.height ?? 0.032
+    const topOff = L.topOffset ?? h / 2
+    const botOff = L.bottomOffset ?? h / 2
+    // delta가 음수(위쪽 화살표)면 topOffset이 커져서 위쪽 경계가 위로 늘어남
+    // 하한은 고정값이 아니라 현재 폰트 크기 기준 동적 최소값(minChipGapNorm) —
+    // 이보다 좁아지면 테두리가 칩 글자와 겹쳐 보일 수 있어 막아준다.
+    const newTopOff = Math.min(LINE_OFFSET_MAX, Math.max(minChipGapNorm.value, topOff - delta))
+    L.topOffset = newTopOff
+    L.bottomOffset = botOff
+    L.height = newTopOff + botOff
   }
   dirty.value = true
 }
 function bumpLineBottom(delta) {
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
-    const h = L.height ?? 0.032, y = L.y ?? 0.1
-    const top = y - h / 2
-    let bottom = y + h / 2
-    bottom = Math.max(top + LINE_HEIGHT_MIN, Math.min(0.995, bottom + delta))
-    let newH = bottom - top
-    if (newH > LINE_HEIGHT_MAX) { bottom = top + LINE_HEIGHT_MAX; newH = LINE_HEIGHT_MAX }
-    L.height = newH; L.y = (top + bottom) / 2
+    const h = L.height ?? 0.032
+    const topOff = L.topOffset ?? h / 2
+    const botOff = L.bottomOffset ?? h / 2
+    // 하한은 minChipGapNorm — 이유는 bumpLineTop 주석 참고
+    const newBotOff = Math.min(LINE_OFFSET_MAX, Math.max(minChipGapNorm.value, botOff + delta))
+    L.topOffset = topOff
+    L.bottomOffset = newBotOff
+    L.height = topOff + newBotOff
   }
   dirty.value = true
 }
@@ -264,7 +301,16 @@ function bumpLineLeft(delta) {
       const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
       return { it, abs: x0 + t * span }
     })
-    let newStart = Math.max(0.005, Math.min(x1 - LINE_WIDTH_MIN, x0 + delta))
+    let newStart = x0 + delta
+    newStart = Math.max(0.005, newStart)
+    newStart = Math.min(x1 - LINE_WIDTH_MIN, newStart)
+    // 가장 왼쪽에 있는 칩의 실제 글자 영역을 넘어서(오른쪽으로) 줄어들지 못하게 제한.
+    // → 버튼(줄이기)을 계속 눌러도 그 칩 바로 앞에서 멈추고, 칩 자체는 절대 안 움직인다.
+    if (absList.length) {
+      const leftMost = absList.reduce((a, b) => (a.abs <= b.abs ? a : b))
+      const maxStartAllowed = leftMost.abs - chipHalfWidthNorm(leftMost.it.chord)
+      newStart = Math.min(newStart, maxStartAllowed)
+    }
     const newSpan = Math.max(0.001, x1 - newStart)
     for (const { it, abs } of absList) {
       it.t = Math.min(0.98, Math.max(0.02, (abs - newStart) / newSpan))
@@ -283,7 +329,15 @@ function bumpLineRight(delta) {
       const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
       return { it, abs: x0 + t * span }
     })
-    let newEnd = Math.min(0.995, Math.max(x0 + LINE_WIDTH_MIN, x1 + delta))
+    let newEnd = x1 + delta
+    newEnd = Math.min(0.995, newEnd)
+    newEnd = Math.max(x0 + LINE_WIDTH_MIN, newEnd)
+    // 가장 오른쪽에 있는 칩의 실제 글자 영역을 넘어서(왼쪽으로) 줄어들지 못하게 제한.
+    if (absList.length) {
+      const rightMost = absList.reduce((a, b) => (a.abs >= b.abs ? a : b))
+      const minEndAllowed = rightMost.abs + chipHalfWidthNorm(rightMost.it.chord)
+      newEnd = Math.max(newEnd, minEndAllowed)
+    }
     const newSpan = Math.max(0.001, newEnd - x0)
     for (const { it, abs } of absList) {
       it.t = Math.min(0.98, Math.max(0.02, (abs - x0) / newSpan))
@@ -344,16 +398,23 @@ const paletteChords = computed(() => {
   if (!selectedRoot.value) return []
   return VARIANTS[selectedRoot.value] || [selectedRoot.value]
 })
+// 편집용 박스(테두리) 스타일: top은 y - topOffset, height는 topOffset + bottomOffset.
+// topOffset/bottomOffset이 아직 없는(예전 저장본) 라인은 height/2로 대칭 처리해
+// 기존 데이터와 호환된다. 칩 위치는 이 함수와 무관하게 chipTopPct()로 따로 계산한다.
 function lineStyle(line) {
-  const h = Math.max(line.height || 0.028, 0.015)
   const y = line.y ?? 0.1
+  const h = Math.max(line.height || 0.028, 0.015)
+  const topOff = line.topOffset ?? h / 2
+  const botOff = line.bottomOffset ?? h / 2
+  const top = y - topOff
+  const height = Math.max(0.001, topOff + botOff)
   const x0 = typeof line.xStart === 'number' ? line.xStart : EDIT_X0
   const x1 = typeof line.xEnd === 'number' ? line.xEnd : EDIT_X1
   return {
-    top: `${(y - h / 2) * 100}%`,
+    top: `${top * 100}%`,
     left: `${x0 * 100}%`,
     width: `${Math.max(0.02, x1 - x0) * 100}%`,
-    height: `${h * 100}%`,
+    height: `${height * 100}%`,
   }
 }
 
@@ -363,9 +424,25 @@ const { normFromEvent, startDrag, onStageClick, onLineClick, onChipClick } = use
   isChordSelected, toggleLineSelection, toggleChordSelection
 })
 
+// 코드칩 가로 위치: item.t는 "박스(xStart~xEnd) 안에서의 상대값"이므로
+// (bumpLineLeft/Right 및 useLinesData.js와 동일한 규약), 칩이 더 이상
+// .chord-line 안에 중첩돼 있지 않은 지금은 여기서 직접 절대좌표로 환산해야 한다.
+// 이걸 빼먹으면 Left/Right로 박스 폭을 줄일 때 칩이 박스 밖으로 튀어나간다.
 function chordLeftPct(line, item) {
   if (typeof item.t !== 'number' || Number.isNaN(item.t)) return '50%'
-  return `${Math.min(98, Math.max(2, item.t * 100))}%`
+  const x0 = typeof line.xStart === 'number' ? line.xStart : EDIT_X0
+  const x1 = typeof line.xEnd === 'number' ? line.xEnd : EDIT_X1
+  const span = Math.max(0.001, x1 - x0)
+  const t = Math.min(0.98, Math.max(0.02, item.t))
+  const abs = x0 + t * span
+  return `${Math.min(99, Math.max(1, abs * 100))}%`
+}
+// 코드 칩은 편집용 박스(.chord-line) 크기(min-height 등 CSS 제약 포함)와
+// 완전히 무관하게, 이미지 전체 기준 절대 y(line.y)로 위치를 잡는다.
+// 그래서 Top/Bottom으로 박스 테두리를 아무리 늘였다 줄여도 칩은 움직이지 않는다.
+function chordTopPct(line) {
+  const y = typeof line.y === 'number' ? line.y : 0.1
+  return `${Math.min(99, Math.max(1, y * 100))}%`
 }
 function pickRoot(root) {
   selectedRoot.value = root
@@ -519,10 +596,27 @@ const statusBanner = computed(() => {
         <div ref="stageRef" class="stage" :class="{ placing: !!placeChord, 'mode-line': bottomTab === 'adjust', 'mode-chord': bottomTab === 'place' }" :style="stageStyle" @click="onStageClick">
           <img :src="imageUrl" class="score-img" draggable="false" @dragstart.prevent alt="악보" @load="measureStageWidth" />
           <div v-if="ocrLoading" class="ocr-scan-overlay"><div class="ocr-scan-info"><span class="ocr-scan-spinner" v-if="ocrQueueInfo?.status === 'queued'" /><span>{{ ocrStatusText }}</span></div><div class="ocr-scan-track"><div class="ocr-scan-line" /><div class="ocr-scan-glass"><svg viewBox="0 0 24 24" width="34" height="34" fill="none"><circle cx="10.5" cy="10.5" r="6.5" stroke="#0d6efd" stroke-width="2.4"/><line x1="15.3" y1="15.3" x2="21" y2="21" stroke="#0d6efd" stroke-width="2.4" stroke-linecap="round"/></svg></div></div></div>
+
+          <!-- 편집용 라인 박스: 순수하게 테두리(드래그·리사이즈 핸들) 표시 용도.
+               코드 칩은 여기 안에 넣지 않는다 (아래 chips-layer 참고) -->
           <div v-for="line in lines" :key="line.id" class="chord-line" :class="{ active: isLineSelected(line.id) }" :style="lineStyle(line)" @click="onLineClick($event, line)">
-            <div class="items-layer">
-              <div v-for="item in line.items" :key="item.id" class="chip" :class="{ selected: isChordSelected(line.id, item.id) }" :style="{ left: chordLeftPct(line, item), fontSize: displayFontPx + 'px' }" @pointerdown="startDrag($event, 'chord-x', line.id, item.id)" @click="onChipClick($event, line, item)"><span>{{ item.chord }}</span></div>
-            </div>
+          </div>
+
+          <!-- 코드 칩 전용 레이어: .chord-line 박스의 크기·min-height 등과 완전히
+               무관하게, 이미지 전체 기준 절대 좌표(line.y / item.t)로만 위치를 잡는다.
+               그래서 Top/Bottom으로 박스 테두리를 늘였다 줄여도 칩은 움직이지 않는다. -->
+          <div class="chips-layer">
+            <template v-for="line in lines" :key="'chips-' + line.id">
+              <div
+                v-for="item in line.items"
+                :key="item.id"
+                class="chip"
+                :class="{ selected: isChordSelected(line.id, item.id) }"
+                :style="{ left: chordLeftPct(line, item), top: chordTopPct(line), fontSize: displayFontPx + 'px' }"
+                @pointerdown="startDrag($event, 'chord-x', line.id, item.id)"
+                @click="onChipClick($event, line, item)"
+              ><span>{{ item.chord }}</span></div>
+            </template>
           </div>
         </div>
       </div>
