@@ -343,7 +343,9 @@
   border: 1px solid rgba(13, 110, 253, 0.18);
   border-radius: 2px;
   z-index: 2;
-  min-height: 18px;
+  /* min-height 제거: 계산 height%와 실제 박스 불일치로
+     Top 첫 클릭 시 bottom 스냅 현상 방지 */
+  min-height: 0;
   cursor: pointer;
   touch-action: none;
 }

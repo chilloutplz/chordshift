@@ -23,6 +23,7 @@ const { toLines, compactLinesForSave } = useLinesData()
 function runOcr() {
   return runOcrCore(lines, toLines, askConfirm, (chords) => {
     lines.value = toLines(chords)
+    ensureLineOffsets(lines.value)
     dirty.value = true
     message.value = `OCR 완료: ${chords.length}개`
     emit('updated', { ...props.sheet, chords: lines.value })
@@ -192,7 +193,9 @@ const displayFontPx = computed(() => {
 // Top/Bottom 최소 오프셋이 이 값보다 작아지면, 박스 테두리가 칩 글자 한가운데를
 // 지나가 보일 수 있으므로 이 값을 하한선으로 사용한다.
 const minChipGapNorm = computed(() => {
-  const chipHalfPx = displayFontPx.value * 1.2 * 0.5 + 4
+  // 칩 글자 영역은 침범하지 않되, 여유(+4px·1.2배)는 줄여 테두리가 더 붙게 한다.
+  // ~1.2em 줄간격의 절반(0.6) + 테두리 1px
+  const chipHalfPx = displayFontPx.value * 0.5 + 1
   if (!(stageHeightPx.value > 0)) return LINE_OFFSET_MIN
   return Math.max(LINE_OFFSET_MIN, chipHalfPx / stageHeightPx.value)
 })
@@ -215,6 +218,7 @@ watch(landscapeMode, (on) => {
   nextTick(() => measureStageWidth())
 })
 watch(zoom, () => nextTick(() => measureStageWidth()))
+watch(minChipGapNorm, () => { ensureLineOffsets(lines.value) })
 
 const selectedLineIds = ref([])
 const lineMultiMode = ref(false)
@@ -259,18 +263,36 @@ function targetLines() {
   const ids = targetLineIds.value
   return lines.value.filter((L) => ids.includes(L.id))
 }
+// topOffset/bottomOffset이 없으면 height/2와 minChipGapNorm 중 큰 값으로 초기화.
+// (minChipGapNorm > h/2 인 경우가 많아, h/2로 시작하면 첫 클릭에서 하한으로 점프)
+function getLineOffsets(L) {
+  const h = L.height ?? 0.032
+  const floor = minChipGapNorm.value
+  const def = Math.max(h / 2, floor)
+  return {
+    topOff: typeof L.topOffset === 'number' ? L.topOffset : def,
+    botOff: typeof L.bottomOffset === 'number' ? L.bottomOffset : def,
+  }
+}
+// 로드/OCR 직후 undefined offset을 미리 채워 첫 클릭 점프를 없앤다.
+function ensureLineOffsets(list) {
+  const floor = minChipGapNorm.value
+  for (const L of list) {
+    if (typeof L.topOffset === 'number' && typeof L.bottomOffset === 'number') continue
+    const h = L.height ?? 0.032
+    const def = Math.max(h / 2, floor)
+    if (typeof L.topOffset !== 'number') L.topOffset = def
+    if (typeof L.bottomOffset !== 'number') L.bottomOffset = def
+    L.height = L.topOffset + L.bottomOffset
+  }
+}
 // Top/Bottom 버튼: 중심(y)은 절대 이동하지 않고, 그쪽 경계(offset)만 조절한다.
-// 코드 칩은 y(절대 앵커)만 참조하므로 이 함수들이 칩 위치에 영향을 주지 않는다.
 function bumpLineTop(delta) {
   const targets = targetLines(); if (!targets.length) return
+  const floor = minChipGapNorm.value
   for (const L of targets) {
-    const h = L.height ?? 0.032
-    const topOff = L.topOffset ?? h / 2
-    const botOff = L.bottomOffset ?? h / 2
-    // delta가 음수(위쪽 화살표)면 topOffset이 커져서 위쪽 경계가 위로 늘어남
-    // 하한은 고정값이 아니라 현재 폰트 크기 기준 동적 최소값(minChipGapNorm) —
-    // 이보다 좁아지면 테두리가 칩 글자와 겹쳐 보일 수 있어 막아준다.
-    const newTopOff = Math.min(LINE_OFFSET_MAX, Math.max(minChipGapNorm.value, topOff - delta))
+    const { topOff, botOff } = getLineOffsets(L)
+    const newTopOff = Math.min(LINE_OFFSET_MAX, Math.max(floor, topOff - delta))
     L.topOffset = newTopOff
     L.bottomOffset = botOff
     L.height = newTopOff + botOff
@@ -279,12 +301,10 @@ function bumpLineTop(delta) {
 }
 function bumpLineBottom(delta) {
   const targets = targetLines(); if (!targets.length) return
+  const floor = minChipGapNorm.value
   for (const L of targets) {
-    const h = L.height ?? 0.032
-    const topOff = L.topOffset ?? h / 2
-    const botOff = L.bottomOffset ?? h / 2
-    // 하한은 minChipGapNorm — 이유는 bumpLineTop 주석 참고
-    const newBotOff = Math.min(LINE_OFFSET_MAX, Math.max(minChipGapNorm.value, botOff + delta))
+    const { topOff, botOff } = getLineOffsets(L)
+    const newBotOff = Math.min(LINE_OFFSET_MAX, Math.max(floor, botOff + delta))
     L.topOffset = topOff
     L.bottomOffset = newBotOff
     L.height = topOff + newBotOff
@@ -292,55 +312,49 @@ function bumpLineBottom(delta) {
   dirty.value = true
 }
 function bumpLineLeft(delta) {
+  // 박스 왼쪽 경계만 이동. item.t 는 이미지 절대좌표이므로 절대 수정하지 않는다.
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
     const x0 = L.xStart ?? EDIT_X0
     const x1 = L.xEnd ?? EDIT_X1
-    const span = Math.max(0.001, x1 - x0)
-    const absList = (L.items || []).map((it) => {
-      const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
-      return { it, abs: x0 + t * span }
-    })
     let newStart = x0 + delta
     newStart = Math.max(0.005, newStart)
     newStart = Math.min(x1 - LINE_WIDTH_MIN, newStart)
-    // 가장 왼쪽에 있는 칩의 실제 글자 영역을 넘어서(오른쪽으로) 줄어들지 못하게 제한.
-    // → 버튼(줄이기)을 계속 눌러도 그 칩 바로 앞에서 멈추고, 칩 자체는 절대 안 움직인다.
-    if (absList.length) {
-      const leftMost = absList.reduce((a, b) => (a.abs <= b.abs ? a : b))
-      const maxStartAllowed = leftMost.abs - chipHalfWidthNorm(leftMost.it.chord)
+    // 가장 왼쪽 칩(절대 t) 글자 영역 안으로 들어오지 못하게만 제한
+    const items = L.items || []
+    if (items.length) {
+      let leftAbs = Infinity
+      let leftChord = ''
+      for (const it of items) {
+        const abs = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+        if (abs < leftAbs) { leftAbs = abs; leftChord = it.chord }
+      }
+      const maxStartAllowed = leftAbs - chipHalfWidthNorm(leftChord)
       newStart = Math.min(newStart, maxStartAllowed)
-    }
-    const newSpan = Math.max(0.001, x1 - newStart)
-    for (const { it, abs } of absList) {
-      it.t = Math.min(0.98, Math.max(0.02, (abs - newStart) / newSpan))
     }
     L.xStart = newStart
   }
   dirty.value = true
 }
 function bumpLineRight(delta) {
+  // 박스 오른쪽 경계만 이동. item.t(절대좌표)는 수정하지 않는다.
   const targets = targetLines(); if (!targets.length) return
   for (const L of targets) {
     const x0 = L.xStart ?? EDIT_X0
     const x1 = L.xEnd ?? EDIT_X1
-    const span = Math.max(0.001, x1 - x0)
-    const absList = (L.items || []).map((it) => {
-      const t = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
-      return { it, abs: x0 + t * span }
-    })
     let newEnd = x1 + delta
     newEnd = Math.min(0.995, newEnd)
     newEnd = Math.max(x0 + LINE_WIDTH_MIN, newEnd)
-    // 가장 오른쪽에 있는 칩의 실제 글자 영역을 넘어서(왼쪽으로) 줄어들지 못하게 제한.
-    if (absList.length) {
-      const rightMost = absList.reduce((a, b) => (a.abs >= b.abs ? a : b))
-      const minEndAllowed = rightMost.abs + chipHalfWidthNorm(rightMost.it.chord)
+    const items = L.items || []
+    if (items.length) {
+      let rightAbs = -Infinity
+      let rightChord = ''
+      for (const it of items) {
+        const abs = typeof it.t === 'number' && !Number.isNaN(it.t) ? it.t : 0.5
+        if (abs > rightAbs) { rightAbs = abs; rightChord = it.chord }
+      }
+      const minEndAllowed = rightAbs + chipHalfWidthNorm(rightChord)
       newEnd = Math.max(newEnd, minEndAllowed)
-    }
-    const newSpan = Math.max(0.001, newEnd - x0)
-    for (const { it, abs } of absList) {
-      it.t = Math.min(0.98, Math.max(0.02, (abs - x0) / newSpan))
     }
     L.xEnd = newEnd
   }
@@ -388,6 +402,7 @@ watch(() => props.sheet, (s, prev) => {
     return
   }
   lines.value = toLines(s.chords)
+  ensureLineOffsets(lines.value)
   ocrHasRun.value = !!(s.chords?.length || s.ocr_raw_text)
   if (s.chord_font_size) chordFontPx.value = s.chord_font_size
   else if (s.chordFontSize) chordFontPx.value = s.chordFontSize
@@ -403,9 +418,7 @@ const paletteChords = computed(() => {
 // 기존 데이터와 호환된다. 칩 위치는 이 함수와 무관하게 chipTopPct()로 따로 계산한다.
 function lineStyle(line) {
   const y = line.y ?? 0.1
-  const h = Math.max(line.height || 0.028, 0.015)
-  const topOff = line.topOffset ?? h / 2
-  const botOff = line.bottomOffset ?? h / 2
+  const { topOff, botOff } = getLineOffsets(line)
   const top = y - topOff
   const height = Math.max(0.001, topOff + botOff)
   const x0 = typeof line.xStart === 'number' ? line.xStart : EDIT_X0
@@ -429,12 +442,9 @@ const { normFromEvent, startDrag, onStageClick, onLineClick, onChipClick } = use
 // .chord-line 안에 중첩돼 있지 않은 지금은 여기서 직접 절대좌표로 환산해야 한다.
 // 이걸 빼먹으면 Left/Right로 박스 폭을 줄일 때 칩이 박스 밖으로 튀어나간다.
 function chordLeftPct(line, item) {
+  // item.t = 이미지 전체 기준 절대 가로 위치 (OCR x/W). 줄 박스(xStart/xEnd)와 무관.
   if (typeof item.t !== 'number' || Number.isNaN(item.t)) return '50%'
-  const x0 = typeof line.xStart === 'number' ? line.xStart : EDIT_X0
-  const x1 = typeof line.xEnd === 'number' ? line.xEnd : EDIT_X1
-  const span = Math.max(0.001, x1 - x0)
-  const t = Math.min(0.98, Math.max(0.02, item.t))
-  const abs = x0 + t * span
+  const abs = Math.min(0.98, Math.max(0.02, item.t))
   return `${Math.min(99, Math.max(1, abs * 100))}%`
 }
 // 코드 칩은 편집용 박스(.chord-line) 크기(min-height 등 CSS 제약 포함)와
