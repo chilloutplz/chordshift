@@ -375,13 +375,19 @@ watch(showSaveModal, async (open) => {
   if (!open) return
   await nextTick(); titleInputRef.value?.focus(); titleInputRef.value?.select()
 })
+/** 파일명에서 확장자 제거 (예: "곡이름.jpg" → "곡이름") */
+function titleWithoutExt(name) {
+  const s = String(name || '').trim()
+  if (!s) return ''
+  return s.replace(/\.(jpe?g|png|webp|gif|bmp|pdf|heic|heif)$/i, '')
+}
 function openSaveModal() {
-  saveTitle.value = (props.sheet.title || '').trim()
+  saveTitle.value = titleWithoutExt(props.sheet.title)
   saveTitleError.value = ''; forceNewOnDuplicate.value = false; dupCandidates.value = []; showSaveModal.value = true
 }
 function handleSaveClick() {
   if (isTemp()) openSaveModal()
-  else { saveTitle.value = (props.sheet.title || '').trim(); confirmSheet() }
+  else { saveTitle.value = titleWithoutExt(props.sheet.title); confirmSheet() }
 }
 function closeSaveModal() { if (confirming.value) return; showSaveModal.value = false }
 function submitSaveModal() {
