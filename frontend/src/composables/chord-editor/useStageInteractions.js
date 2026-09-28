@@ -5,7 +5,7 @@ function clampNorm(v) {
 }
 
 export function useStageInteractions({
-  lines, drag, activeLineId, placeChord, bottomTab, landscapeMode,
+  lines, drag, activeLineId, placeChord, bottomTab,
   stageRef, message, dirty,
   isChordSelected, toggleLineSelection, toggleChordSelection
 }) {
@@ -14,15 +14,9 @@ export function useStageInteractions({
     if (!el) return null
     const rect = el.getBoundingClientRect()
     if (!rect.width || !rect.height) return null
-    if (!landscapeMode.value) {
-      return {
-        x: clampNorm((e.clientX - rect.left) / rect.width),
-        y: clampNorm((e.clientY - rect.top) / rect.height),
-      }
-    }
     return {
-      x: clampNorm((e.clientY - rect.top) / rect.height),
-      y: clampNorm(1 - (e.clientX - rect.left) / rect.width),
+      x: clampNorm((e.clientX - rect.left) / rect.width),
+      y: clampNorm((e.clientY - rect.top) / rect.height),
     }
   }
 

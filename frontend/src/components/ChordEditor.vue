@@ -39,17 +39,6 @@ function answerConfirm(ok) {
   if (cur) cur.resolve(!!ok)
 }
 
-function preferMobileLandscape() {
-  if (typeof window === 'undefined') return false
-  try {
-    if (window.matchMedia('(pointer: coarse)').matches) return true
-    if (window.matchMedia('(max-width: 900px)').matches) return true
-  } catch (_) {}
-  return false
-}
-const landscapeMode = ref(false)
-const toolsCollapsed = ref(false)
-
 const activeLineId = ref(null)
 const placeChord = ref('')
 const previewChord = ref('')
@@ -117,7 +106,6 @@ function toggleChordSelection(lineId, itemId) {
   }
   placeChord.value = ''
   bottomTab.value = 'place'
-  toolsCollapsed.value = false
   activeLineId.value = lineId
   if (selectedChordKeys.value.length === 1) {
     const k = selectedChordKeys.value[0]
@@ -213,10 +201,6 @@ function chipHalfWidthNorm(chordText) {
   const stageW = stageWidthPx.value > 0 ? stageWidthPx.value : 640
   return (widthPx / 2) / stageW
 }
-watch(landscapeMode, (on) => {
-  if (!on) toolsCollapsed.value = false
-  nextTick(() => measureStageWidth())
-})
 watch(zoom, () => nextTick(() => measureStageWidth()))
 watch(minChipGapNorm, () => { ensureLineOffsets(lines.value) })
 
@@ -251,12 +235,10 @@ function clearLineSelection() { selectedLineIds.value = [] }
 const LINE_NUDGE_STEP = 0.006
 const CHORD_NUDGE_STEP = 0.01
 const LINE_EDGE_STEP = 0.004
-const LINE_HEIGHT_MIN = 0.014
-const LINE_HEIGHT_MAX = 0.08
 const LINE_WIDTH_MIN = 0.06
 // top/bottom 경계를 독립적으로 움직이기 위한 오프셋(각각 y로부터의 거리) 한계.
-// 기존 LINE_HEIGHT_MIN/MAX는 "대칭 높이" 기준이라 그대로 재사용하지 않고,
-// 편도(한쪽) 오프셋 기준으로 별도 한계를 둔다.
+// (예전엔 대칭 높이 기준 LINE_HEIGHT_MIN/MAX를 썼는데, topOffset/bottomOffset
+// 도입 후 편도 오프셋 기준으로 바뀌면서 더 이상 쓰이지 않아 제거함)
 const LINE_OFFSET_MIN = 0.005
 const LINE_OFFSET_MAX = 0.08
 function targetLines() {
@@ -360,7 +342,9 @@ function bumpLineRight(delta) {
   }
   dirty.value = true
 }
-function nudgeLine(dx, dy) {
+// 세로 전체 이동(박스+칩이 함께 움직임). 가로 이동 기능은 없다 —
+// 개별 칩 드래그나 Left/Right 리사이즈로만 가로 위치를 다룬다.
+function nudgeLine(dy) {
   const targets = targetLines(); if (!targets.length) return
   if (dy) { for (const L of targets) L.y = Math.min(0.98, Math.max(0.02, (L.y ?? 0.1) + dy)); dirty.value = true }
 }
@@ -421,7 +405,7 @@ const paletteChords = computed(() => {
 })
 // 편집용 박스(테두리) 스타일: top은 y - topOffset, height는 topOffset + bottomOffset.
 // topOffset/bottomOffset이 아직 없는(예전 저장본) 라인은 height/2로 대칭 처리해
-// 기존 데이터와 호환된다. 칩 위치는 이 함수와 무관하게 chipTopPct()로 따로 계산한다.
+// 기존 데이터와 호환된다. 칩 위치는 이 함수와 무관하게 chordTopPct()로 따로 계산한다.
 function lineStyle(line) {
   const y = line.y ?? 0.1
   const { topOff, botOff } = getLineOffsets(line)
@@ -438,15 +422,14 @@ function lineStyle(line) {
 }
 
 const { normFromEvent, startDrag, onStageClick, onLineClick, onChipClick } = useStageInteractions({
-  lines, drag, activeLineId, placeChord, bottomTab, landscapeMode,
+  lines, drag, activeLineId, placeChord, bottomTab,
   stageRef, message, dirty,
   isChordSelected, toggleLineSelection, toggleChordSelection
 })
 
-// 코드칩 가로 위치: item.t는 "박스(xStart~xEnd) 안에서의 상대값"이므로
-// (bumpLineLeft/Right 및 useLinesData.js와 동일한 규약), 칩이 더 이상
-// .chord-line 안에 중첩돼 있지 않은 지금은 여기서 직접 절대좌표로 환산해야 한다.
-// 이걸 빼먹으면 Left/Right로 박스 폭을 줄일 때 칩이 박스 밖으로 튀어나간다.
+// 코드칩 가로 위치: item.t는 useLinesData.js와 동일하게 "이미지 전체 기준
+// 절대 가로 위치"다. 박스(xStart~xEnd)와는 무관하므로 Left/Right로 박스 폭을
+// 줄여도 그대로 유지된다 (bumpLineLeft/Right가 t를 건드리지 않는 이유).
 function chordLeftPct(line, item) {
   // item.t = 이미지 전체 기준 절대 가로 위치 (OCR x/W). 줄 박스(xStart/xEnd)와 무관.
   if (typeof item.t !== 'number' || Number.isNaN(item.t)) return '50%'
@@ -520,7 +503,9 @@ async function saveLines() {
     else res = await apiFetch(`/api/songs/${props.sheet.id}/`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     if (!res.ok) throw new Error('저장 실패')
     const data = await res.json().catch(() => ({}))
-    lines.value = toLines(chordsToSave); dirty.value = false
+    lines.value = toLines(chordsToSave)
+    ensureLineOffsets(lines.value)
+    dirty.value = false
     emit('updated', { ...props.sheet, ...data, chords: chordsToSave, chord_font_size: chordFontPx.value })
   } catch (e) { message.value = e.message } finally { saving.value = false }
 }
@@ -582,16 +567,18 @@ const statusBanner = computed(() => {
 </script>
 
 <template>
-  <div class="editor" :class="{ landscape: landscapeMode, 'tools-collapsed': toolsCollapsed }">
+  <div class="editor">
     <div class="top-bar">
       <button class="icon-btn" title="목록" aria-label="목록" @click="handleBackClick">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
-      <button class="ocr-pill" @click="runOcr" :disabled="ocrLoading">{{ ocrLoading ? (ocrHasRun ? '재실행 중…' : 'OCR 중…') : (ocrHasRun ? 'OCR 재실행' : 'OCR 실행') }}</button>
+      <button
+        class="ocr-pill"
+        @click="runOcr"
+        :disabled="ocrLoading || !isTemp()"
+        :title="!isTemp() ? '이미 저장된 곡은 원본을 새로 업로드해야 OCR을 다시 돌릴 수 있어요' : ''"
+      >{{ ocrLoading ? (ocrHasRun ? '재실행 중…' : 'OCR 중…') : (ocrHasRun ? 'OCR 재실행' : 'OCR 실행') }}</button>
       <button class="save-pill" :disabled="confirming || !lines.length" @click="handleSaveClick">{{ confirming ? '저장 중…' : '저장' }}</button>
-      <button class="icon-btn" :class="{ on: landscapeMode }" title="가로 화면으로 보기" @click="landscapeMode = !landscapeMode">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="2" y="6" width="20" height="12" rx="2.5" stroke="currentColor" stroke-width="2" /><path d="M22 10v4" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
-      </button>
     </div>
     <p v-if="statusBanner" class="status-banner" :class="statusBanner.kind">
       <span v-if="statusBanner.kind === 'loading'" class="ocr-status-dot" :class="{ queued: ocrQueueInfo?.status === 'queued' }" />{{ statusBanner.text }}
@@ -640,9 +627,8 @@ const statusBanner = computed(() => {
     <div v-else class="canvas-empty">악보 이미지를 불러오는 중입니다…</div>
     <div class="bottom-tools">
       <div class="bt-tabs">
-        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'; toolsCollapsed = false">Line</button>
-        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'; toolsCollapsed = false">Chord</button>
-        <button v-if="landscapeMode" type="button" class="bt-collapse" @click="toolsCollapsed = !toolsCollapsed">{{ toolsCollapsed ? '▲ 도구' : '▼ 접기' }}</button>
+        <button type="button" :class="{ on: bottomTab === 'adjust' }" @click="bottomTab = 'adjust'">Line</button>
+        <button type="button" :class="{ on: bottomTab === 'place' }" @click="bottomTab = 'place'">Chord</button>
       </div>
       <div class="bt-panel" v-show="bottomTab === 'place'">
         <div class="chord-sel-bar">
@@ -678,8 +664,8 @@ const statusBanner = computed(() => {
                 <button type="button" class="lt-btn" @click="selectAllLines">All</button>
                 <span class="lt-sep" />
                 <div class="lt-pair">
-                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, -LINE_NUDGE_STEP)">↑</button>
-                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(0, LINE_NUDGE_STEP)">↓</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(-LINE_NUDGE_STEP)">↑</button>
+                  <button type="button" class="lt-icon" :disabled="!targetLineIds.length" @click="nudgeLine(LINE_NUDGE_STEP)">↓</button>
                 </div>
             </div>
             <div class="lt-row">
